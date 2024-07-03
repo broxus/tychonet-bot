@@ -112,9 +112,9 @@ impl State {
 
         let gate_update_output = self.run_gate_update().await?;
         if !gate_update_output.status.success() {
-            let error_message = String::from_utf8_lossy(&gate_update_output.stderr).to_string();
-            tracing::error!("Gate update failed: {error_message}");
-            r.update("Gate update failed:\n```\n{error_message}\n```")
+            let e = String::from_utf8_lossy(&gate_update_output.stderr).to_string();
+            tracing::error!("Gate update failed: {e}");
+            r.update(format!("Gate update failed:\n```\n{e}\n```"))
                 .await?;
             return Ok(());
         }
@@ -124,9 +124,9 @@ impl State {
 
         let reset_output = self.run_ansible_reset(commit).await?;
         if !reset_output.status.success() {
-            let error_message = String::from_utf8_lossy(&reset_output.stderr).to_string();
-            tracing::error!("Reset playbook execution failed: {error_message}");
-            r.update("Reset playbook execution failed:\n```\n{error_message}\n```")
+            let e = String::from_utf8_lossy(&reset_output.stderr).to_string();
+            tracing::error!("Reset playbook execution failed: {e}");
+            r.update(format!("Reset playbook execution failed:\n```\n{e}\n```"))
                 .await?;
             return Ok(());
         }
@@ -136,9 +136,9 @@ impl State {
 
         let setup_output = self.run_ansible_setup(commit).await?;
         if !setup_output.status.success() {
-            let error_message = String::from_utf8_lossy(&setup_output.stderr).to_string();
-            tracing::error!("Setup playbook execution failed: {error_message}");
-            r.update("Setup playbook execution failed:\n```\n{error_message}\n```")
+            let e = String::from_utf8_lossy(&setup_output.stderr).to_string();
+            tracing::error!("Setup playbook execution failed: {e}");
+            r.update(format!("Setup playbook execution failed:\n```\n{e}\n```"))
                 .await?;
             return Ok(());
         }
