@@ -31,13 +31,13 @@ impl SendMessageExt for teloxide::requests::JsonRequest<teloxide::payloads::Edit
 }
 
 fn escape_markdown(text: impl Into<String>) -> String {
-    static ESCAPED_CHARACTERS: [char; 18] = [
-        '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
+    static ESCAPED_CHARACTERS: [char; 17] = [
+        '_', '*', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
     ];
 
-    static ESCAPED_CHARACTERS_REPLACEMENT: [&str; 18] = [
-        "\\_", "\\*", "\\[", "\\]", "\\(", "\\)", "\\~", "\\`", "\\>", "\\#", "\\+", "\\-", "\\=",
-        "\\|", "\\{", "\\}", "\\.", "\\!",
+    static ESCAPED_CHARACTERS_REPLACEMENT: [&str; 17] = [
+        "\\_", "\\*", "\\[", "\\]", "\\(", "\\)", "\\~", "\\>", "\\#", "\\+", "\\-", "\\=", "\\|",
+        "\\{", "\\}", "\\.", "\\!",
     ];
 
     let mut text: String = text.into();

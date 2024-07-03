@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use everscale_types::models::{AccountState, AccountStatus, StdAddr};
 use serde_json::Value;
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, MessageId, ParseMode};
+use teloxide::types::{ChatId, MessageId};
 
 use crate::commands::{Currency, DecimalTokens};
 use crate::jrpc_client;

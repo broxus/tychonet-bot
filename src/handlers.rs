@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use teloxide::prelude::*;
-use teloxide::types::ParseMode;
 use teloxide::utils::command::BotCommands;
 
 use crate::commands::Command;
@@ -40,13 +39,22 @@ pub async fn handle_command(
         }
         Command::Status => state.get_status().await,
         Command::Reset(commit) => {
-            let commit = commit.trim();
-            let commit = if commit.is_empty() { "master" } else { commit };
+            tokio::spawn(async move {
+                let commit = commit.trim();
+                let commit = if commit.is_empty() { "master" } else { commit };
 
-            match state.reset_network(bot.clone(), &msg, commit).await {
-                Ok(()) => return Ok(()),
-                Err(e) => Err(e),
-            }
+                if let Err(e) = state.reset_network(bot.clone(), &msg, &commit).await {
+                    tracing::error!("request failed: {e:?}");
+
+                    let reply = format!("Failed to handle reset:\n```\n{e}\n```");
+                    _ = bot
+                        .send_message(msg.chat.id, reply)
+                        .reply_to(&msg)
+                        .markdown()
+                        .await;
+                }
+            });
+            return Ok(());
         }
         Command::GetCommit => Ok(state.get_saved_commit()),
         Command::Give { address, amount } => {
