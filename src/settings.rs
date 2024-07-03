@@ -1,4 +1,5 @@
-use std::env;
+use std::str::FromStr;
+
 use anyhow::{Context, Result};
 use dotenvy::dotenv;
 use serde::Deserialize;
@@ -17,28 +18,40 @@ pub struct Settings {
 pub fn load_settings() -> Result<Settings> {
     dotenv().ok();
 
-    let allowed_groups = env::var("TYCHONET_ALLOWED_GROUPS")
-        .context("TYCHONET_ALLOWED_GROUPS not set in .env")?
-        .trim_matches(|c| c == '[' || c == ']') // Remove surrounding brackets
-        .split(',')
-        .map(|s| s.trim().parse::<i64>())
-        .collect::<Result<Vec<_>, _>>()
-        .context("Failed to parse TYCHONET_ALLOWED_GROUPS")?;
-
-    let authentication_enabled = env::var("TYCHONET_AUTHENTICATION_ENABLED")
-        .context("TYCHONET_AUTHENTICATION_ENABLED not set in .env")?
-        .parse::<bool>()
-        .context("Failed to parse TYCHONET_AUTHENTICATION_ENABLED as boolean")?;
-
-    let settings = Settings {
-        bot_token: env::var("TYCHONET_BOT_TOKEN").context("TYCHONET_BOT_TOKEN not set in .env")?,
-        rpc_url: env::var("TYCHONET_RPC_URL").context("TYCHONET_RPC_URL not set in .env")?,
-        inventory_file: env::var("TYCHONET_INVENTORY_FILE").context("TYCHONET_INVENTORY_FILE not set in .env")?,
-        reset_playbook: env::var("TYCHONET_RESET_PLAYBOOK").context("TYCHONET_RESET_PLAYBOOK not set in .env")?,
-        setup_playbook: env::var("TYCHONET_SETUP_PLAYBOOK").context("TYCHONET_SETUP_PLAYBOOK not set in .env")?,
-        allowed_groups,
-        authentication_enabled,
-    };
-
-    Ok(settings)
+    Ok(Settings {
+        bot_token: get_env("BOT_TOKEN")?,
+        rpc_url: get_env("RPC_URL")?,
+        inventory_file: get_env("INVENTORY_FILE")?,
+        reset_playbook: get_env("RESET_PLAYBOOK")?,
+        setup_playbook: get_env("SETUP_PLAYBOOK")?,
+        allowed_groups: get_env::<List<i64>>("ALLOWED_GROUPS")?.0,
+        authentication_enabled: get_env("AUTHENTICATION_ENABLED")?,
+    })
 }
+
+struct List<T>(Vec<T>);
+
+impl<T: FromStr> FromStr for List<T> {
+    type Err = T::Err;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let list = s
+            .trim()
+            .trim_matches(|c| c == '[' || c == ']') // Remove surrounding brackets
+            .split(',')
+            .map(|s| s.trim().parse::<T>())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self(list))
+    }
+}
+
+fn get_env<T: FromStr<Err: Into<anyhow::Error>>>(name: &str) -> Result<T> {
+    let key = format!("{PREFIX}_{name}");
+    let value = std::env::var(&key).with_context(|| format!("{key} not set in .env"))?;
+    value
+        .parse()
+        .map_err(Into::into)
+        .with_context(|| format!("Failed to parse {key}"))
+}
+
+const PREFIX: &str = "TYCHONET";

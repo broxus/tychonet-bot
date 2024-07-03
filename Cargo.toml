@@ -6,13 +6,13 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 bigdecimal = "0.4"
-config = { version = "0.14", default-features = false, features = ["toml"] }
+dotenvy = "0.15.7"
 num-format = "0.4"
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
 teloxide = { version = "0.12", features = ["macros"] }
-tokio = { version = "1.0", features = ["macros", "sync", "rt-multi-thread"] }
+tokio = { version = "1.0", features = ["macros", "sync", "rt-multi-thread", "process"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -22,4 +22,3 @@ everscale-types = { git = "https://github.com/broxus/everscale-types.git", defau
     "base64",
     "serde",
 ] }
-dotenvy = "0.15.7"

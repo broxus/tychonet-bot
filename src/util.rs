@@ -1,3 +1,15 @@
+pub trait SendMessageExt {
+    fn reply_to(self, message: &teloxide::prelude::Message) -> Self;
+}
+
+impl SendMessageExt for teloxide::requests::JsonRequest<teloxide::payloads::SendMessage> {
+    fn reply_to(mut self, message: &teloxide::prelude::Message) -> Self {
+        self.reply_to_message_id = Some(message.id);
+        self.message_thread_id = message.thread_id;
+        self
+    }
+}
+
 pub mod serde_string {
     use std::str::FromStr;
 

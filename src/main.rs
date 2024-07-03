@@ -1,9 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
+
 use anyhow::Result;
 use teloxide::net;
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
+
 use crate::commands::Command;
 use crate::handlers::handle_command;
 use crate::settings::load_settings;
@@ -11,9 +13,9 @@ use crate::state::State;
 
 mod commands;
 mod handlers;
-mod state;
-mod settings;
 mod jrpc_client;
+mod settings;
+mod state;
 mod util;
 
 #[tokio::main]

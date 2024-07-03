@@ -1,10 +1,13 @@
 use everscale_types::models::StdAddr;
 use everscale_types::num::Tokens;
-use teloxide::utils::command::BotCommands;
 use std::str::FromStr;
+use teloxide::utils::command::BotCommands;
 
 #[derive(BotCommands, Clone)]
-#[command(rename_rule = "lowercase", description = "These commands are supported:")]
+#[command(
+    rename_rule = "lowercase",
+    description = "These commands are supported:"
+)]
 pub enum Command {
     #[command(description = "display this text.")]
     Start,
@@ -12,12 +15,20 @@ pub enum Command {
     GetChatId,
     #[command(description = "get network status")]
     Status,
-    #[command(description = "reset network with the commit hash or branch name. e.g. /reset master")]
+    #[command(
+        description = "reset network with the commit hash or branch name. e.g. /reset master"
+    )]
     Reset(String),
     #[command(description = "retrieve the current deployed commit")]
     GetCommit,
-    #[command(description = "give some tokens to the specified address.", parse_with = "split")]
-    Give { address: StdAddr, amount: DecimalTokens },
+    #[command(
+        description = "give some tokens to the specified address.",
+        parse_with = "split"
+    )]
+    Give {
+        address: StdAddr,
+        amount: DecimalTokens,
+    },
     #[command(description = "get an account state of the specified address.")]
     Account { address: StdAddr },
     #[command(description = "get the blockchain config param.")]
@@ -45,8 +56,14 @@ impl FromStr for DecimalTokens {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let (number, _) = bigdecimal::BigDecimal::from_str(s)?.with_scale(9).into_bigint_and_exponent();
-        number.to_string().parse::<Tokens>().map(Self).map_err(Into::into)
+        let (number, _) = bigdecimal::BigDecimal::from_str(s)?
+            .with_scale(9)
+            .into_bigint_and_exponent();
+        number
+            .to_string()
+            .parse::<Tokens>()
+            .map(Self)
+            .map_err(Into::into)
     }
 }
 
