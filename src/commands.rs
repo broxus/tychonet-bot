@@ -9,17 +9,15 @@ use teloxide::utils::command::BotCommands;
     description = "These commands are supported:"
 )]
 pub enum Command {
-    #[command(description = "display this text.")]
+    #[command(description = "display this text")]
     Start,
     #[command(description = "get chat ID.")]
     GetChatId,
-    #[command(description = "get network status")]
+    #[command(description = "get network status.")]
     Status,
-    #[command(
-        description = "reset network with the commit hash or branch name. e.g. /reset master"
-    )]
+    #[command(description = "reset network with the commit hash or branch name.")]
     Reset(String),
-    #[command(description = "retrieve the current deployed commit")]
+    #[command(description = "retrieve the current deployed commit.")]
     GetCommit,
     #[command(
         description = "give some tokens to the specified address.",

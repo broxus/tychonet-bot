@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -18,8 +19,8 @@ pub struct State {
     inventory_file: String,
     reset_playbook: String,
     setup_playbook: String,
-    pub(crate) allowed_groups: Vec<i64>,
-    pub(crate) authentication_enabled: bool,
+    allowed_groups: HashSet<i64>,
+    authentication_enabled: bool,
     saved_commit: Mutex<String>,
     reset_running: AtomicBool,
 }
@@ -31,7 +32,7 @@ impl State {
             inventory_file: settings.inventory_file.clone(),
             reset_playbook: settings.reset_playbook.clone(),
             setup_playbook: settings.setup_playbook.clone(),
-            allowed_groups: settings.allowed_groups.clone(),
+            allowed_groups: settings.allowed_groups.iter().copied().collect(),
             authentication_enabled: settings.authentication_enabled.clone(),
             saved_commit: Mutex::new("".to_string()),
             reset_running: AtomicBool::new(false),
@@ -93,6 +94,13 @@ impl State {
             fn drop(&mut self) {
                 self.0.store(false, Ordering::Relaxed);
             }
+        }
+
+        if !self.check_auth(msg) {
+            bot.send_message(msg.chat.id, "👮‍♀️ Access denied")
+                .reply_to(&msg)
+                .await?;
+            return Ok(());
         }
 
         let _guard = {
@@ -190,6 +198,10 @@ impl State {
             .output()
             .await
             .context("Failed to execute setup playbook")
+    }
+
+    fn check_auth(&self, msg: &Message) -> bool {
+        !self.authentication_enabled || self.allowed_groups.contains(&msg.chat.id.0)
     }
 }
 

@@ -13,16 +13,6 @@ pub async fn handle_command(
     cmd: Command,
     state: Arc<State>,
 ) -> ResponseResult<()> {
-    if state.authentication_enabled {
-        let allowed_groups = &state.allowed_groups;
-        if !allowed_groups.contains(&msg.chat.id.0) {
-            bot.send_message(msg.chat.id, "Access denied.")
-                .reply_to(&msg)
-                .await?;
-            return Ok(());
-        }
-    }
-
     let response = match cmd {
         Command::Start => {
             bot.send_message(msg.chat.id, Command::descriptions().to_string())
