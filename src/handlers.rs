@@ -68,7 +68,7 @@ pub async fn handle_command(
 
     bot.send_message(msg.chat.id, reply_text)
         .reply_to(&msg)
-        .parse_mode(ParseMode::MarkdownV2)
+        .markdown()
         .await?;
 
     Ok(())

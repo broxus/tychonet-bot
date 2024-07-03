@@ -205,7 +205,7 @@ impl LongReply {
         let reply = bot
             .send_message(chat_id, text)
             .reply_to(&msg)
-            .parse_mode(ParseMode::MarkdownV2)
+            .markdown()
             .await?;
         Ok(Self {
             bot,
@@ -217,7 +217,7 @@ impl LongReply {
     async fn update(&self, text: impl Into<String>) -> Result<()> {
         self.bot
             .edit_message_text(self.chat_id, self.reply_msg_id, text)
-            .parse_mode(ParseMode::MarkdownV2)
+            .markdown()
             .await?;
         Ok(())
     }

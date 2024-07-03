@@ -1,5 +1,7 @@
 pub trait SendMessageExt {
     fn reply_to(self, message: &teloxide::prelude::Message) -> Self;
+
+    fn markdown(self) -> Self;
 }
 
 impl SendMessageExt for teloxide::requests::JsonRequest<teloxide::payloads::SendMessage> {
@@ -8,6 +10,44 @@ impl SendMessageExt for teloxide::requests::JsonRequest<teloxide::payloads::Send
         self.message_thread_id = message.thread_id;
         self
     }
+
+    fn markdown(mut self) -> Self {
+        self.parse_mode = Some(teloxide::types::ParseMode::MarkdownV2);
+        self.text = escape_markdown(std::mem::take(&mut self.text));
+        self
+    }
+}
+
+impl SendMessageExt for teloxide::requests::JsonRequest<teloxide::payloads::EditMessageText> {
+    fn reply_to(self, _: &teloxide::prelude::Message) -> Self {
+        self
+    }
+
+    fn markdown(mut self) -> Self {
+        self.parse_mode = Some(teloxide::types::ParseMode::MarkdownV2);
+        self.text = escape_markdown(std::mem::take(&mut self.text));
+        self
+    }
+}
+
+fn escape_markdown(text: impl Into<String>) -> String {
+    static ESCAPED_CHARACTERS: [char; 18] = [
+        '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
+    ];
+
+    static ESCAPED_CHARACTERS_REPLACEMENT: [&str; 18] = [
+        "\\_", "\\*", "\\[", "\\]", "\\(", "\\)", "\\~", "\\`", "\\>", "\\#", "\\+", "\\-", "\\=",
+        "\\|", "\\{", "\\}", "\\.", "\\!",
+    ];
+
+    let mut text: String = text.into();
+    for (character, replacement) in ESCAPED_CHARACTERS
+        .iter()
+        .zip(ESCAPED_CHARACTERS_REPLACEMENT.iter())
+    {
+        text = text.replace(*character, replacement);
+    }
+    text
 }
 
 pub mod serde_string {
