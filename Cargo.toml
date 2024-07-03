@@ -22,3 +22,4 @@ everscale-types = { git = "https://github.com/broxus/everscale-types.git", defau
     "base64",
     "serde",
 ] }
+dotenvy = "0.15.7"
