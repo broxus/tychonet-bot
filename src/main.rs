@@ -17,6 +17,7 @@ mod jrpc_client;
 mod settings;
 mod state;
 mod util;
+mod config;
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -9,6 +11,7 @@ use teloxide::prelude::*;
 use teloxide::types::{ChatId, MessageId};
 
 use crate::commands::{Currency, DecimalTokens};
+use crate::config::Config;
 use crate::jrpc_client;
 use crate::jrpc_client::{JrpcClient, StateTimings};
 use crate::settings::Settings;
@@ -17,6 +20,7 @@ use crate::util::SendMessageExt;
 pub struct State {
     client: JrpcClient,
     inventory_file: String,
+    tycho_config_file: String,
     reset_playbook: String,
     setup_playbook: String,
     allowed_groups: HashSet<i64>,
@@ -30,6 +34,7 @@ impl State {
         Ok(Self {
             client: JrpcClient::new(&settings.rpc_url)?,
             inventory_file: settings.inventory_file.clone(),
+            tycho_config_file: settings.tycho_config_file.clone(),
             reset_playbook: settings.reset_playbook.clone(),
             setup_playbook: settings.setup_playbook.clone(),
             allowed_groups: settings.allowed_groups.iter().copied().collect(),
@@ -156,7 +161,7 @@ impl State {
         r.update(format!(
             "✅ Network reset completed successfully with commit:\n`{commit}`",
         ))
-        .await?;
+            .await?;
         Ok(())
     }
 
@@ -198,6 +203,70 @@ impl State {
             .output()
             .await
             .context("Failed to execute setup playbook")
+    }
+
+    pub async fn set_node_config(&self, config: String, bot: Bot, msg: &Message) -> Result<()> {
+        if !self.check_auth(msg) {
+            bot.send_message(msg.chat.id, "👮‍♀️ Access denied")
+                .reply_to(&msg)
+                .await?;
+            return Ok(());
+        }
+
+        let default_file = format!("{}_default", &self.tycho_config_file);
+        if !Path::new(&default_file).exists() {
+            fs::copy(&self.tycho_config_file, &default_file)?;
+        }
+
+        let mut current_config = Config::from_file(&self.tycho_config_file)?;
+
+        let mut errors = Vec::new();
+
+        for line in config.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = line.split('=').collect();
+            if parts.len() != 2 {
+                errors.push(format!("Invalid config line: {}", line));
+                continue;
+            }
+            let key = parts[0].trim();
+            let value = parts[1].trim();
+
+            if let Err(e) = current_config.update(key, value) {
+                errors.push(format!("Failed to update config: {}: {}", key, e));
+            }
+        }
+
+        current_config.to_file(&self.tycho_config_file)?;
+
+        if !errors.is_empty() {
+            let error_message = errors.join("\n");
+            bot.send_message(msg.chat.id, format!("Node config updated with some errors:\n{}", error_message))
+                .reply_to(&msg)
+                .await?;
+        } else {
+            bot.send_message(msg.chat.id, "Node config updated successfully")
+                .reply_to(&msg)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+
+    pub async fn get_node_config(&self) -> Result<Reply> {
+        let config = Config::from_file(&self.tycho_config_file)?;
+        let config_json = serde_json::to_string_pretty(&config)?;
+        Ok(Reply::Message(format!("```json\n{}\n```", config_json)))
+    }
+
+    pub async fn reset_node_config(&self) -> Result<Reply> {
+        let default_file = format!("{}_default", &self.tycho_config_file);
+        fs::copy(&default_file, &self.tycho_config_file)?;
+        Ok(Reply::Message("Node config reset to default successfully".to_string()))
     }
 
     fn check_auth(&self, msg: &Message) -> bool {
@@ -249,6 +318,7 @@ pub enum Reply {
         value: Value,
         param: i32,
     },
+    Message(String),
 }
 
 impl std::fmt::Display for Reply {
@@ -283,6 +353,9 @@ impl std::fmt::Display for Reply {
                     f,
                     "Global ID: {global_id}\nKey Block Seqno: {seqno}\n\nParam {param}:\n```json\n{value_str}\n```"
                 )
+            }
+            Self::Message(msg) => {
+                write!(f, "{msg}")
             }
         }
     }
