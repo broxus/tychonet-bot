@@ -19,6 +19,12 @@ pub enum Command {
     Reset(String),
     #[command(description = "retrieve the current deployed commit.")]
     GetCommit,
+    #[command(description = "set node config.")]
+    SetNodeConfig(String),
+    #[command(description = "get node config.")]
+    GetNodeConfig,
+    #[command(description = "reset node config.")]
+    ResetNodeConfig,
     #[command(
         description = "give some tokens to the specified address.",
         parse_with = "split"
@@ -53,7 +59,7 @@ impl std::fmt::Display for DecimalTokens {
 impl FromStr for DecimalTokens {
     type Err = anyhow::Error;
 
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (number, _) = bigdecimal::BigDecimal::from_str(s)?
             .with_scale(9)
             .into_bigint_and_exponent();
