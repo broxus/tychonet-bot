@@ -102,7 +102,7 @@ impl State {
         }
 
         if !self.check_auth(msg) {
-            bot.send_message(msg.chat.id, "👮‍♀️ Access denied")
+            bot.send_message(msg.chat.id, Reply::AccessDenied.to_string())
                 .reply_to(&msg)
                 .await?;
             return Ok(());
@@ -161,7 +161,7 @@ impl State {
         r.update(format!(
             "✅ Network reset completed successfully with commit:\n`{commit}`",
         ))
-            .await?;
+        .await?;
         Ok(())
     }
 
@@ -205,19 +205,7 @@ impl State {
             .context("Failed to execute setup playbook")
     }
 
-    pub async fn set_node_config(&self, config: String, bot: Bot, msg: &Message) -> Result<()> {
-        if !self.check_auth(msg) {
-            bot.send_message(msg.chat.id, "👮‍♀️ Access denied")
-                .reply_to(&msg)
-                .await?;
-            return Ok(());
-        }
-
-        let default_file = format!("{}_default", &self.tycho_config_file);
-        if !Path::new(&default_file).exists() {
-            fs::copy(&self.tycho_config_file, &default_file)?;
-        }
-
+    pub async fn set_node_config(&self, config: &str) -> Result<Reply> {
         let mut current_config = Config::from_file(&self.tycho_config_file)?;
 
         let mut errors = Vec::new();
@@ -242,36 +230,29 @@ impl State {
 
         current_config.to_file(&self.tycho_config_file)?;
 
-        if !errors.is_empty() {
-            let error_message = errors.join("\n");
-            bot.send_message(msg.chat.id, format!("Node config updated with some errors:\n{}", error_message))
-                .reply_to(&msg)
-                .await?;
-        } else {
-            bot.send_message(msg.chat.id, "Node config updated successfully")
-                .reply_to(&msg)
-                .await?;
-        }
-
         Ok(())
     }
 
-
-    pub async fn get_node_config(&self) -> Result<Reply> {
-        let config = Config::from_file(&self.tycho_config_file)?;
-        let config_json = serde_json::to_string_pretty(&config)?;
-        Ok(Reply::Message(format!("```json\n{}\n```", config_json)))
+    pub async fn get_node_config(&self, path: &str) -> Result<Reply> {
+        let path = parse_config_value_path(path)?;
+        let mut config = Config::from_file(&self.tycho_config_file)?;
     }
 
-    pub async fn reset_node_config(&self) -> Result<Reply> {
-        let default_file = format!("{}_default", &self.tycho_config_file);
-        fs::copy(&default_file, &self.tycho_config_file)?;
-        Ok(Reply::Message("Node config reset to default successfully".to_string()))
-    }
-
-    fn check_auth(&self, msg: &Message) -> bool {
+    pub fn check_auth(&self, msg: &Message) -> bool {
         !self.authentication_enabled || self.allowed_groups.contains(&msg.chat.id.0)
     }
+}
+
+fn parse_config_value_path(s: &str) -> Result<Vec<String>> {
+    let s = s.trim();
+    let s = s.strip_prefix('.').unwrap_or(s);
+    s.split('.')
+        .map(|item| {
+            let item = item.trim();
+            anyhow::ensure!(!item.is_empty(), "empty path items are not allowed");
+            Ok(item.to_owned())
+        })
+        .collect()
 }
 
 struct LongReply {
@@ -319,6 +300,9 @@ pub enum Reply {
         param: i32,
     },
     Message(String),
+    ConfigUpdated(String),
+    Config(String),
+    AccessDenied,
 }
 
 impl std::fmt::Display for Reply {
@@ -356,6 +340,15 @@ impl std::fmt::Display for Reply {
             }
             Self::Message(msg) => {
                 write!(f, "{msg}")
+            }
+            Self::ConfigUpdated(msg) => {
+                write!(f, "Node config updated:\n{msg}")
+            }
+            Self::Config(config) => {
+                write!(f, "```json\n{config}\n```")
+            }
+            Self::AccessDenied => {
+                write!(f, "👮‍♀️ Access denied")
             }
         }
     }

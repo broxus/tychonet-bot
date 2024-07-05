@@ -22,9 +22,7 @@ pub enum Command {
     #[command(description = "set node config.")]
     SetNodeConfig(String),
     #[command(description = "get node config.")]
-    GetNodeConfig,
-    #[command(description = "reset node config.")]
-    ResetNodeConfig,
+    GetNodeConfig(String),
     #[command(
         description = "give some tokens to the specified address.",
         parse_with = "split"
