@@ -47,9 +47,9 @@ pub async fn handle_command(
             return Ok(());
         }
         Command::GetCommit => Ok(state.get_saved_commit()),
-        Command::SetNodeConfig(config) => {
+        Command::SetNodeConfig(expr) => {
             if state.check_auth(&msg) {
-                state.set_node_config(&config).await
+                state.set_node_config(&expr).await
             } else {
                 Ok(Reply::AccessDenied)
             }

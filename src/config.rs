@@ -1,9 +1,13 @@
-use anyhow::{Context, Result};
+use std::collections::VecDeque;
 use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use similar::{Change, ChangeTag, TextDiff};
 
 pub struct Config {
     path: PathBuf,
     value: serde_json::Value,
+    initial_value: String,
 }
 
 impl Config {
@@ -13,26 +17,47 @@ impl Config {
         Ok(Self {
             path: PathBuf::from(path),
             value,
+            initial_value: config_str,
         })
     }
 
-    pub fn save(&self) -> Result<()> {
-        let data =
+    pub fn save(self) -> Result<ConfigDiff> {
+        let new_value =
             serde_json::to_string_pretty(&self.value).context("Failed to serialize config")?;
-        std::fs::write(&self.path, data).context("Failed to write config file")
+        std::fs::write(&self.path, &new_value).context("Failed to write config file")?;
+
+        Ok(ConfigDiff {
+            old: self.initial_value,
+            new: new_value,
+        })
+    }
+
+    pub fn get(&self, path: &[String]) -> Result<&serde_json::Value> {
+        let mut current = &self.value;
+        let mut full_path = String::new();
+        for key in path {
+            let serde_json::Value::Object(object) = current else {
+                return Err(object_expected(&full_path));
+            };
+            full_path = format!("{full_path}.{key}");
+
+            match object.get(key) {
+                Some(value) => current = value,
+                None => anyhow::bail!("'{full_path}' not found"),
+            }
+        }
+
+        Ok(current)
     }
 
     pub fn set(&mut self, path: &[String], value: serde_json::Value) -> Result<()> {
         let mut current = &mut self.value;
         let mut full_path = String::new();
         for key in path {
-            full_path = format!("{full_path}{key}");
             let serde_json::Value::Object(object) = current else {
-                anyhow::bail!(
-                    "expected '{}' to be an object",
-                    full_path.trim_end_matches(|c| c != '.')
-                );
+                return Err(object_expected(&full_path));
             };
+            full_path = format!("{full_path}.{key}");
 
             current = object
                 .entry(key)
@@ -50,16 +75,13 @@ impl Config {
         let mut iter = path.iter().peekable();
 
         while let Some(key) = iter.next() {
-            full_path = format!("{full_path}.{key}");
             let serde_json::Value::Object(object) = current else {
-                anyhow::bail!(
-                    "expected '{}' to be an object",
-                    full_path.trim_end_matches(|c| c != '.')
-                );
+                return Err(object_expected(&full_path));
             };
+            full_path = format!("{full_path}.{key}");
 
             match object.entry(key) {
-                serde_json::map::Entry::Occupied(entry) if iter.peek().is_some() => {
+                serde_json::map::Entry::Occupied(entry) if iter.peek().is_none() => {
                     entry.remove();
                     return Ok(());
                 }
@@ -74,4 +96,61 @@ impl Config {
 
         Ok(())
     }
+}
+
+pub struct ConfigDiff {
+    old: String,
+    new: String,
+}
+
+impl std::fmt::Display for ConfigDiff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const LINES_BEFORE: usize = 3;
+        const LINES_AFTER: usize = 3;
+
+        let diff = TextDiff::from_lines(&self.old, &self.new);
+
+        let mut stack = VecDeque::with_capacity(LINES_BEFORE);
+        let mut lines_after_change = None::<usize>;
+        for change in diff.iter_all_changes() {
+            let sign = match change.tag() {
+                ChangeTag::Delete => "-",
+                ChangeTag::Insert => "+",
+                ChangeTag::Equal => {
+                    if let Some(lines) = &mut lines_after_change {
+                        *lines += 1;
+
+                        if *lines <= LINES_AFTER {
+                            write!(f, " {change}")?;
+                            continue;
+                        }
+                    }
+
+                    if stack.len() >= LINES_BEFORE {
+                        stack.pop_front();
+                    }
+                    stack.push_back(change);
+                    continue;
+                }
+            };
+
+            while let Some(change) = stack.pop_front() {
+                write!(f, " {}", change)?;
+            }
+            write!(f, "{sign}{change}")?;
+
+            lines_after_change = Some(0);
+        }
+
+        if lines_after_change.is_none() {
+            write!(f, "unchanged")?;
+        }
+
+        Ok(())
+    }
+}
+
+fn object_expected(path: &str) -> anyhow::Error {
+    let path = if path.is_empty() { "." } else { path };
+    anyhow::anyhow!("expected '{path}' to be an object")
 }

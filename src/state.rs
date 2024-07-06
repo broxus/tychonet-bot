@@ -1,6 +1,4 @@
 use std::collections::HashSet;
-use std::fs;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -11,7 +9,7 @@ use teloxide::prelude::*;
 use teloxide::types::{ChatId, MessageId};
 
 use crate::commands::{Currency, DecimalTokens};
-use crate::config::Config;
+use crate::config::{Config, ConfigDiff};
 use crate::jrpc_client;
 use crate::jrpc_client::{JrpcClient, StateTimings};
 use crate::settings::Settings;
@@ -205,37 +203,35 @@ impl State {
             .context("Failed to execute setup playbook")
     }
 
-    pub async fn set_node_config(&self, config: &str) -> Result<Reply> {
-        let mut current_config = Config::from_file(&self.tycho_config_file)?;
+    pub async fn set_node_config(&self, expr: &str) -> Result<Reply> {
+        let mut config = Config::from_file(&self.tycho_config_file)?;
 
-        let mut errors = Vec::new();
-
-        for line in config.lines() {
-            if line.trim().is_empty() {
-                continue;
+        let expr = expr.trim();
+        match expr.strip_prefix("delete") {
+            Some(path) => {
+                let path = parse_config_value_path(path)?;
+                anyhow::ensure!(!path.is_empty(), "cannot delete the config root");
+                config.remove(&path)?;
             }
+            None => {
+                let (path, value) = expr
+                    .split_once('=')
+                    .context("expected an expression: (.path)+ = json")?;
 
-            let parts: Vec<&str> = line.split('=').collect();
-            if parts.len() != 2 {
-                errors.push(format!("Invalid config line: {}", line));
-                continue;
-            }
-            let key = parts[0].trim();
-            let value = parts[1].trim();
-
-            if let Err(e) = current_config.update(key, value) {
-                errors.push(format!("Failed to update config: {}: {}", key, e));
+                let path = parse_config_value_path(path)?;
+                let value = serde_json::from_str(value)?;
+                config.set(&path, value)?;
             }
         }
 
-        current_config.to_file(&self.tycho_config_file)?;
-
-        Ok(())
+        config.save().map(Reply::NodeConfigUpdated)
     }
 
     pub async fn get_node_config(&self, path: &str) -> Result<Reply> {
         let path = parse_config_value_path(path)?;
-        let mut config = Config::from_file(&self.tycho_config_file)?;
+        let config = Config::from_file(&self.tycho_config_file)?;
+        let value = serde_json::to_string_pretty(config.get(&path)?)?;
+        Ok(Reply::NodeConfigParam(value))
     }
 
     pub fn check_auth(&self, msg: &Message) -> bool {
@@ -245,6 +241,10 @@ impl State {
 
 fn parse_config_value_path(s: &str) -> Result<Vec<String>> {
     let s = s.trim();
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let s = s.strip_prefix('.').unwrap_or(s);
     s.split('.')
         .map(|item| {
@@ -299,9 +299,8 @@ pub enum Reply {
         value: Value,
         param: i32,
     },
-    Message(String),
-    ConfigUpdated(String),
-    Config(String),
+    NodeConfigUpdated(ConfigDiff),
+    NodeConfigParam(String),
     AccessDenied,
 }
 
@@ -338,13 +337,10 @@ impl std::fmt::Display for Reply {
                     "Global ID: {global_id}\nKey Block Seqno: {seqno}\n\nParam {param}:\n```json\n{value_str}\n```"
                 )
             }
-            Self::Message(msg) => {
-                write!(f, "{msg}")
+            Self::NodeConfigUpdated(msg) => {
+                write!(f, "Node config updated:\n```\n{msg}\n```")
             }
-            Self::ConfigUpdated(msg) => {
-                write!(f, "Node config updated:\n{msg}")
-            }
-            Self::Config(config) => {
+            Self::NodeConfigParam(config) => {
                 write!(f, "```json\n{config}\n```")
             }
             Self::AccessDenied => {
