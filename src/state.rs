@@ -338,7 +338,7 @@ impl std::fmt::Display for Reply {
                 )
             }
             Self::NodeConfigUpdated(msg) => {
-                write!(f, "Node config updated:\n```\n{msg}\n```")
+                write!(f, "Node config updated:\n```json\n{msg}\n```")
             }
             Self::NodeConfigParam(config) => {
                 write!(f, "```json\n{config}\n```")
