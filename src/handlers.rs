@@ -4,7 +4,7 @@ use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 
 use crate::commands::Command;
-use crate::state::State;
+use crate::state::{Reply, State};
 use crate::util::SendMessageExt;
 
 pub async fn handle_command(
@@ -47,23 +47,14 @@ pub async fn handle_command(
             return Ok(());
         }
         Command::GetCommit => Ok(state.get_saved_commit()),
-        Command::SetNodeConfig(config) => {
-            tokio::spawn(async move {
-                if let Err(e) = state.set_node_config(config, bot.clone(), &msg).await {
-                    tracing::error!("request failed: {e:?}");
-
-                    let reply = format!("Failed to handle set_node_config:\n```\n{e}\n```");
-                    _ = bot
-                        .send_message(msg.chat.id, reply)
-                        .reply_to(&msg)
-                        .markdown()
-                        .await;
-                }
-            });
-            return Ok(());
+        Command::SetNodeConfig(expr) => {
+            if state.check_auth(&msg) {
+                state.set_node_config(&expr).await
+            } else {
+                Ok(Reply::AccessDenied)
+            }
         }
-        Command::GetNodeConfig => state.get_node_config().await,
-        Command::ResetNodeConfig => state.reset_node_config().await,
+        Command::GetNodeConfig(path) => state.get_node_config(&path).await,
         Command::Give { address, amount } => {
             // TODO
             tracing::info!("{}{}", address, amount);

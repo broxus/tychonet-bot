@@ -12,12 +12,12 @@ use crate::settings::load_settings;
 use crate::state::State;
 
 mod commands;
+mod config;
 mod handlers;
 mod jrpc_client;
 mod settings;
 mod state;
 mod util;
-mod config;
 
 #[tokio::main]
 async fn main() -> Result<()> {

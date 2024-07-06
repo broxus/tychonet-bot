@@ -1,185 +1,156 @@
-use serde::{Deserialize, Serialize};
-use std::fs;
+use std::collections::VecDeque;
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
+use similar::{Change, ChangeTag, TextDiff};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    pub local_ip: String,
-    pub port: u32,
-    pub threads: Threads,
-    pub network: Network,
-    pub dht: Dht,
-    pub peer_resolver: PeerResolver,
-    pub overlay: Overlay,
-    pub public_overlay_client: PublicOverlayClient,
-    pub storage: Storage,
-    pub blockchain_rpc_service: BlockchainRpcService,
-    pub blockchain_block_provider: BlockchainBlockProvider,
-    pub rpc: Rpc,
-    pub collator: Collator,
-    pub metrics: Metrics,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Threads {
-    pub rayon_threads: u32,
-    pub tokio_workers: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Network {
-    pub quic: Option<()>,
-    pub connection_manager_channel_capacity: u32,
-    pub connectivity_check_interval: String,
-    pub max_frame_size: Option<()>,
-    pub connect_timeout: String,
-    pub connection_backoff: String,
-    pub max_connection_backoff: String,
-    pub max_concurrent_outstanding_connections: u32,
-    pub max_concurrent_connections: Option<()>,
-    pub active_peers_event_channel_capacity: u32,
-    pub shutdown_idle_timeout: String,
-    pub enable_0rtt: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Dht {
-    pub max_k: u32,
-    pub max_peer_info_ttl: String,
-    pub max_stored_value_ttl: String,
-    pub max_storage_capacity: u32,
-    pub storage_item_time_to_idle: Option<()>,
-    pub local_info_refresh_period: String,
-    pub local_info_announce_period: String,
-    pub local_info_announce_period_max_jitter: String,
-    pub routing_table_refresh_period: String,
-    pub routing_table_refresh_period_max_jitter: String,
-    pub announced_peers_channel_capacity: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PeerResolver {
-    pub max_parallel_resolve_requests: u32,
-    pub min_ttl_sec: u32,
-    pub update_before_sec: u32,
-    pub fast_retry_count: u32,
-    pub min_retry_interval: String,
-    pub max_retry_interval: String,
-    pub stale_retry_interval: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Overlay {
-    pub public_overlay_peer_store_period: String,
-    pub public_overlay_peer_store_max_jitter: String,
-    pub public_overlay_peer_store_max_entries: u32,
-    pub public_overlay_peer_exchange_period: String,
-    pub public_overlay_peer_exchange_max_jitter: String,
-    pub public_overlay_peer_discovery_period: String,
-    pub public_overlay_peer_discovery_max_jitter: String,
-    pub exchange_public_entries_batch: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublicOverlayClient {
-    pub neighbours_update_interval: String,
-    pub neighbours_ping_interval: String,
-    pub max_neighbours: u32,
-    pub max_ping_tasks: u32,
-    pub default_roundtrip: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Storage {
-    pub root_dir: String,
-    pub rocksdb_enable_metrics: bool,
-    pub rocksdb_lru_capacity: String,
-    pub cells_cache_size: String,
-    pub archives: Option<()>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockchainRpcService {
-    pub max_key_blocks_list_len: u32,
-    pub serve_persistent_states: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockchainBlockProvider {
-    pub get_next_block_polling_interval: String,
-    pub get_block_polling_interval: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Rpc {
-    pub listen_addr: String,
-    pub generate_stub_keyblock: bool,
-    pub transactions_gc: TransactionsGc,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransactionsGc {
-    pub tx_ttl: String,
-    pub interval: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Collator {
-    pub supported_block_version: u32,
-    pub supported_capabilities: Vec<String>,
-    pub mc_block_min_interval: String,
-    pub max_mc_block_delta_from_bc_to_await_own: u32,
-    pub max_uncommitted_chain_length: u32,
-    pub uncommitted_chain_to_import_next_anchor: u32,
-    pub block_txs_limit: u32,
-    pub msgs_exec_params: MsgsExecParams,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MsgsExecParams {
-    pub set_size: u32,
-    pub min_externals_per_set: u32,
-    pub group_limit: u32,
-    pub group_vert_size: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Metrics {
-    pub listen_addr: String,
+    path: PathBuf,
+    value: serde_json::Value,
+    initial_value: String,
 }
 
 impl Config {
     pub fn from_file(path: &str) -> Result<Self> {
-        let config_str = fs::read_to_string(path).context("Failed to read config file")?;
-        let config: Config = serde_json::from_str(&config_str).context("Failed to parse config file")?;
-        Ok(config)
+        let config_str = std::fs::read_to_string(path).context("Failed to read config file")?;
+        let value = serde_json::from_str(&config_str).context("Failed to parse config file")?;
+        Ok(Self {
+            path: PathBuf::from(path),
+            value,
+            initial_value: config_str,
+        })
     }
 
-    pub fn to_file(&self, path: &str) -> Result<()> {
-        let config_str = serde_json::to_string_pretty(self).context("Failed to serialize config")?;
-        fs::write(path, config_str).context("Failed to write config file")?;
+    pub fn save(self) -> Result<ConfigDiff> {
+        let new_value =
+            serde_json::to_string_pretty(&self.value).context("Failed to serialize config")?;
+        std::fs::write(&self.path, &new_value).context("Failed to write config file")?;
+
+        Ok(ConfigDiff {
+            old: self.initial_value,
+            new: new_value,
+        })
+    }
+
+    pub fn get(&self, path: &[String]) -> Result<&serde_json::Value> {
+        let mut current = &self.value;
+        let mut full_path = String::new();
+        for key in path {
+            let serde_json::Value::Object(object) = current else {
+                return Err(object_expected(&full_path));
+            };
+            full_path = format!("{full_path}.{key}");
+
+            match object.get(key) {
+                Some(value) => current = value,
+                None => anyhow::bail!("'{full_path}' not found"),
+            }
+        }
+
+        Ok(current)
+    }
+
+    pub fn set(&mut self, path: &[String], value: serde_json::Value) -> Result<()> {
+        let mut current = &mut self.value;
+        let mut full_path = String::new();
+        for key in path {
+            let serde_json::Value::Object(object) = current else {
+                return Err(object_expected(&full_path));
+            };
+            full_path = format!("{full_path}.{key}");
+
+            current = object
+                .entry(key)
+                .or_insert_with(|| serde_json::Value::Object(Default::default()));
+        }
+
+        *current = value;
         Ok(())
     }
 
-    pub fn update(&mut self, key: &str, value: &str) -> Result<()> {
-        let mut current = serde_json::to_value(self.clone()).context("Failed to convert config to JSON value")?;
-        let parts: Vec<&str> = key.split('.').collect();
-        let mut current_ref = &mut current;
+    pub fn remove(&mut self, path: &[String]) -> Result<()> {
+        let mut current = &mut self.value;
 
-        for &part in &parts[..parts.len() - 1] {
-            current_ref = current_ref
-                .get_mut(part)
-                .ok_or_else(|| anyhow::anyhow!("Key path does not exist: {}", key))?;
+        let mut full_path = String::new();
+        let mut iter = path.iter().peekable();
+
+        while let Some(key) = iter.next() {
+            let serde_json::Value::Object(object) = current else {
+                return Err(object_expected(&full_path));
+            };
+            full_path = format!("{full_path}.{key}");
+
+            match object.entry(key) {
+                serde_json::map::Entry::Occupied(entry) if iter.peek().is_none() => {
+                    entry.remove();
+                    return Ok(());
+                }
+                serde_json::map::Entry::Occupied(entry) => {
+                    current = entry.into_mut();
+                }
+                serde_json::map::Entry::Vacant(_) => {
+                    return Ok(());
+                }
+            }
         }
-
-        *current_ref
-            .get_mut(parts.last().unwrap())
-            .ok_or_else(|| anyhow::anyhow!("Key path does not exist: {}", key))? = serde_json::from_str(value)?;
-
-        *self = serde_json::from_value(current).context("Failed to convert JSON value back to config")?;
 
         Ok(())
     }
 }
 
+pub struct ConfigDiff {
+    old: String,
+    new: String,
+}
 
+impl std::fmt::Display for ConfigDiff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const LINES_BEFORE: usize = 3;
+        const LINES_AFTER: usize = 3;
+
+        let diff = TextDiff::from_lines(&self.old, &self.new);
+
+        let mut stack = VecDeque::with_capacity(LINES_BEFORE);
+        let mut lines_after_change = None::<usize>;
+        for change in diff.iter_all_changes() {
+            let sign = match change.tag() {
+                ChangeTag::Delete => "-",
+                ChangeTag::Insert => "+",
+                ChangeTag::Equal => {
+                    if let Some(lines) = &mut lines_after_change {
+                        *lines += 1;
+
+                        if *lines <= LINES_AFTER {
+                            write!(f, " {change}")?;
+                            continue;
+                        }
+                    }
+
+                    if stack.len() >= LINES_BEFORE {
+                        stack.pop_front();
+                    }
+                    stack.push_back(change);
+                    continue;
+                }
+            };
+
+            while let Some(change) = stack.pop_front() {
+                write!(f, " {}", change)?;
+            }
+            write!(f, "{sign}{change}")?;
+
+            lines_after_change = Some(0);
+        }
+
+        if lines_after_change.is_none() {
+            write!(f, "unchanged")?;
+        }
+
+        Ok(())
+    }
+}
+
+fn object_expected(path: &str) -> anyhow::Error {
+    let path = if path.is_empty() { "." } else { path };
+    anyhow::anyhow!("expected '{path}' to be an object")
+}
