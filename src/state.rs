@@ -191,6 +191,9 @@ impl State {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 writeln!(f, "✅ Network reset completed successfully!\n")?;
 
+                for line in self.0.message.lines() {
+                    writeln!(f, "> {line}")?;
+                }
                 writeln!(f, "Commit: `{}`\n", self.0.sha)?;
 
                 if !self.0.branches.is_empty() {
@@ -445,6 +448,9 @@ impl std::fmt::Display for Reply {
                 write!(f, "Timings:\n```json\n{reply_data}\n```")
             }
             Self::Commit(commit) => {
+                for line in commit.message.lines() {
+                    writeln!(f, "> {line}")?;
+                }
                 writeln!(f, "Commit: `{}`\n", commit.sha)?;
 
                 if !commit.branches.is_empty() {
