@@ -5,7 +5,7 @@ use teloxide::utils::command::BotCommands;
 
 use crate::commands::Command;
 use crate::state::{Reply, State};
-use crate::util::SendMessageExt;
+use crate::util::{SendMessageExt, WithLinkPreview};
 
 pub async fn handle_command(
     bot: Bot,
@@ -64,15 +64,24 @@ pub async fn handle_command(
         Command::GetParam { param } => state.get_param(param).await,
     };
 
+    let mut link_preview_options = None;
     let reply_text = match response {
-        Ok(reply) => reply.to_string(),
+        Ok(reply) => {
+            link_preview_options = reply.link_preview_options();
+            reply.to_string()
+        }
         Err(err) => {
             tracing::error!("request failed: {err:?}");
             format!("Failed to handle command:\n```\n{err}\n```")
         }
     };
 
-    bot.send_message(msg.chat.id, reply_text)
+    let req = WithLinkPreview {
+        inner: teloxide::payloads::SendMessage::new(msg.chat.id, reply_text),
+        link_preview_options,
+    };
+
+    teloxide::requests::JsonRequest::new(bot, req)
         .reply_to(&msg)
         .markdown()
         .await?;

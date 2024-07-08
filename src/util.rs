@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 pub trait SendMessageExt {
     fn reply_to(self, message: &teloxide::prelude::Message) -> Self;
 
@@ -28,6 +30,69 @@ impl SendMessageExt for teloxide::requests::JsonRequest<teloxide::payloads::Edit
         self.text = escape_markdown(std::mem::take(&mut self.text));
         self
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WithLinkPreview<T> {
+    #[serde(flatten)]
+    pub inner: T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_preview_options: Option<LinkPreviewOptions>,
+}
+
+pub trait WithLinkPreviewSetters<T>:
+    teloxide::requests::HasPayload<Payload = WithLinkPreview<T>> + Sized
+{
+    fn link_preview_options(mut self, options: Option<LinkPreviewOptions>) -> Self {
+        self.payload_mut().link_preview_options = options;
+        self
+    }
+}
+
+impl<P, T> WithLinkPreviewSetters<T> for P where
+    P: teloxide::requests::HasPayload<Payload = WithLinkPreview<T>>
+{
+}
+
+impl<T: teloxide::requests::Payload> teloxide::requests::Payload for WithLinkPreview<T> {
+    type Output = <T as teloxide::requests::Payload>::Output;
+
+    const NAME: &'static str = <T as teloxide::requests::Payload>::NAME;
+}
+
+impl SendMessageExt
+    for teloxide::requests::JsonRequest<WithLinkPreview<teloxide::payloads::SendMessage>>
+{
+    fn reply_to(mut self, message: &teloxide::prelude::Message) -> Self {
+        self.inner.reply_to_message_id = Some(message.id);
+        self.inner.message_thread_id = message.thread_id;
+        self
+    }
+
+    fn markdown(mut self) -> Self {
+        self.inner.parse_mode = Some(teloxide::types::ParseMode::MarkdownV2);
+        self.inner.text = escape_markdown(std::mem::take(&mut self.inner.text));
+        self
+    }
+}
+
+impl SendMessageExt
+    for teloxide::requests::JsonRequest<WithLinkPreview<teloxide::payloads::EditMessageText>>
+{
+    fn reply_to(self, _: &teloxide::prelude::Message) -> Self {
+        self
+    }
+
+    fn markdown(mut self) -> Self {
+        self.inner.parse_mode = Some(teloxide::types::ParseMode::MarkdownV2);
+        self.inner.text = escape_markdown(std::mem::take(&mut self.inner.text));
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkPreviewOptions {
+    pub url: String,
 }
 
 fn escape_markdown(text: impl Into<String>) -> String {

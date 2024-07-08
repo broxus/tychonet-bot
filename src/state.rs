@@ -8,6 +8,7 @@ use everscale_types::models::{AccountState, AccountStatus, StdAddr};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use teloxide::prelude::*;
+use teloxide::requests::JsonRequest;
 use teloxide::types::{ChatId, MessageId};
 
 use crate::commands::{Currency, DecimalTokens};
@@ -16,7 +17,7 @@ use crate::github_client::GithubClient;
 use crate::jrpc_client;
 use crate::jrpc_client::{JrpcClient, StateTimings};
 use crate::settings::Settings;
-use crate::util::SendMessageExt;
+use crate::util::{LinkPreviewOptions, SendMessageExt, WithLinkPreview, WithLinkPreviewSetters};
 
 const DEFAULT_BRANCH: &str = "master";
 
@@ -188,16 +189,31 @@ impl State {
 
         impl std::fmt::Display for SucessReply<'_> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(
-                    f,
-                    "✅ Network reset completed successfully with commit:\n{}\n\n{}",
-                    DisplayFullCommit(self.0),
-                    self.0.html_url
-                )
+                writeln!(f, "✅ Network reset completed successfully!\n")?;
+
+                writeln!(f, "Commit: `{}`\n", self.0.sha)?;
+
+                if !self.0.branches.is_empty() {
+                    let mut first = true;
+                    write!(f, "Branch: ")?;
+                    for name in &self.0.branches {
+                        write!(
+                            f,
+                            "{}`{name}`",
+                            if std::mem::take(&mut first) { "" } else { ", " }
+                        )?;
+                    }
+                    writeln!(f, "\n")?;
+                }
+
+                f.write_str(&self.0.html_url)
             }
         }
 
         let success_reply = SucessReply(&commit_info).to_string();
+        let link_preview = LinkPreviewOptions {
+            url: commit_info.html_url.clone(),
+        };
 
         {
             let mut state_file = self.state_file.lock().unwrap();
@@ -205,7 +221,9 @@ impl State {
             state_file.save()?;
         }
 
-        r.update(success_reply).await?;
+        r.update(success_reply)
+            .link_preview_options(Some(link_preview))
+            .await?;
         Ok(())
     }
 
@@ -340,29 +358,6 @@ pub struct CommitInfo {
     pub branches: Vec<String>,
 }
 
-struct DisplayFullCommit<'a>(&'a CommitInfo);
-
-impl std::fmt::Display for DisplayFullCommit<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0.sha)?;
-
-        if !self.0.branches.is_empty() {
-            let mut first = true;
-            write!(f, " (branch: ")?;
-            for name in &self.0.branches {
-                write!(
-                    f,
-                    "{}`{name}`",
-                    if std::mem::take(&mut first) { "" } else { ", " }
-                )?;
-            }
-            write!(f, ")")?;
-        }
-
-        Ok(())
-    }
-}
-
 fn parse_config_value_path(s: &str) -> Result<Vec<String>> {
     let s = s.trim();
     if s.is_empty() {
@@ -400,12 +395,15 @@ impl LongReply {
         })
     }
 
-    async fn update(&self, text: impl Into<String>) -> Result<()> {
-        self.bot
-            .edit_message_text(self.chat_id, self.reply_msg_id, text)
-            .markdown()
-            .await?;
-        Ok(())
+    fn update(
+        &self,
+        text: impl Into<String>,
+    ) -> teloxide::requests::JsonRequest<WithLinkPreview<teloxide::payloads::EditMessageText>> {
+        let req = WithLinkPreview {
+            inner: teloxide::payloads::EditMessageText::new(self.chat_id, self.reply_msg_id, text),
+            link_preview_options: None,
+        };
+        JsonRequest::new(self.bot.clone(), req).markdown()
     }
 }
 
@@ -428,6 +426,17 @@ pub enum Reply {
     AccessDenied,
 }
 
+impl Reply {
+    pub fn link_preview_options(&self) -> Option<LinkPreviewOptions> {
+        match self {
+            Self::Commit(commit) => Some(LinkPreviewOptions {
+                url: commit.html_url.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
 impl std::fmt::Display for Reply {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -436,12 +445,22 @@ impl std::fmt::Display for Reply {
                 write!(f, "Timings:\n```json\n{reply_data}\n```")
             }
             Self::Commit(commit) => {
-                write!(
-                    f,
-                    "Current deployed commit:\n{}\n\n{}",
-                    DisplayFullCommit(commit),
-                    commit.html_url
-                )
+                writeln!(f, "Commit: `{}`\n", commit.sha)?;
+
+                if !commit.branches.is_empty() {
+                    let mut first = true;
+                    write!(f, "Branch: ")?;
+                    for name in &commit.branches {
+                        write!(
+                            f,
+                            "{}`{name}`",
+                            if std::mem::take(&mut first) { "" } else { ", " }
+                        )?;
+                    }
+                    writeln!(f, "\n")?;
+                }
+
+                f.write_str(&commit.html_url)
             }
             Self::Account {
                 address,
