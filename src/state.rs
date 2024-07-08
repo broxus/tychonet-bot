@@ -1,49 +1,71 @@
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use everscale_types::models::{AccountState, AccountStatus, StdAddr};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, MessageId};
 
 use crate::commands::{Currency, DecimalTokens};
 use crate::config::{Config, ConfigDiff};
+use crate::github_client::GithubClient;
 use crate::jrpc_client;
 use crate::jrpc_client::{JrpcClient, StateTimings};
 use crate::settings::Settings;
 use crate::util::SendMessageExt;
 
+const DEFAULT_BRANCH: &str = "master";
+
 pub struct State {
-    client: JrpcClient,
+    jrpc_client: JrpcClient,
+    github_client: GithubClient,
     inventory_file: String,
     tycho_config_file: String,
     reset_playbook: String,
     setup_playbook: String,
     allowed_groups: HashSet<i64>,
     authentication_enabled: bool,
-    saved_commit: Mutex<String>,
+    state_file: Mutex<StateFile>,
     reset_running: AtomicBool,
 }
 
 impl State {
-    pub fn new(settings: &Settings) -> Result<Self> {
+    pub async fn new(settings: &Settings) -> Result<Self> {
+        let github_client = GithubClient::new(&settings.github_token, "broxus", "tycho")?;
+
+        let mut state_file = StateFile::load(&settings.state_file)?;
+        if state_file.latest_data.last_commit_info.is_none() {
+            let latest_commit = github_client.get_commit_sha(DEFAULT_BRANCH).await?;
+            let commit_info = github_client.get_commit_info(&latest_commit).await?;
+            state_file.latest_data.last_commit_info = Some(CommitInfo {
+                sha: latest_commit,
+                html_url: commit_info.html_url,
+                message: commit_info.message,
+                branches: vec![DEFAULT_BRANCH.to_owned()],
+            });
+            state_file.save()?;
+        }
+
         Ok(Self {
-            client: JrpcClient::new(&settings.rpc_url)?,
+            jrpc_client: JrpcClient::new(&settings.rpc_url)?,
+            github_client,
             inventory_file: settings.inventory_file.clone(),
             tycho_config_file: settings.tycho_config_file.clone(),
             reset_playbook: settings.reset_playbook.clone(),
             setup_playbook: settings.setup_playbook.clone(),
             allowed_groups: settings.allowed_groups.iter().copied().collect(),
-            authentication_enabled: settings.authentication_enabled.clone(),
-            saved_commit: Mutex::new("".to_string()),
+            authentication_enabled: settings.authentication_enabled,
+            state_file: Mutex::new(state_file),
             reset_running: AtomicBool::new(false),
         })
     }
 
     pub async fn get_status(&self) -> Result<Reply> {
-        self.client
+        self.jrpc_client
             .get_timings()
             .await
             .map(Reply::Timings)
@@ -51,7 +73,7 @@ impl State {
     }
 
     pub async fn get_account(&self, address: &StdAddr) -> Result<Reply> {
-        let res = self.client.get_account(address).await?;
+        let res = self.jrpc_client.get_account(address).await?;
         let reply = match res {
             jrpc_client::AccountStateResponse::NotExists { .. } => Reply::Account {
                 address: address.clone(),
@@ -75,7 +97,7 @@ impl State {
     }
 
     pub async fn get_param(&self, param: i32) -> Result<Reply> {
-        let res = self.client.get_config().await?;
+        let res = self.jrpc_client.get_config().await?;
         let value = serde_json::to_value(res.config.params)?;
 
         Ok(Reply::ConfigParam {
@@ -86,8 +108,14 @@ impl State {
         })
     }
 
-    pub fn get_saved_commit(&self) -> Reply {
-        Reply::Commit(self.saved_commit.lock().unwrap().clone())
+    pub fn get_saved_commit(&self) -> Result<Reply> {
+        let state_file = self.state_file.lock().unwrap();
+        state_file
+            .latest_data
+            .last_commit_info
+            .clone()
+            .map(Reply::Commit)
+            .context("no commit info saved")
     }
 
     pub async fn reset_network(&self, bot: Bot, msg: &Message, commit: &str) -> Result<()> {
@@ -101,7 +129,7 @@ impl State {
 
         if !self.check_auth(msg) {
             bot.send_message(msg.chat.id, Reply::AccessDenied.to_string())
-                .reply_to(&msg)
+                .reply_to(msg)
                 .await?;
             return Ok(());
         }
@@ -109,7 +137,7 @@ impl State {
         let _guard = {
             if self.reset_running.swap(true, Ordering::Relaxed) {
                 bot.send_message(msg.chat.id, "Reset is already running")
-                    .reply_to(&msg)
+                    .reply_to(msg)
                     .await?;
                 return Ok(());
             }
@@ -118,6 +146,8 @@ impl State {
         };
 
         let r = LongReply::begin(bot, msg, "Starting network reset...").await?;
+
+        let commit_info = self.get_commit_info(commit).await?;
 
         r.update("🔄 Updating gate...").await?;
 
@@ -154,12 +184,28 @@ impl State {
             return Ok(());
         }
 
-        *self.saved_commit.lock().unwrap() = commit.to_owned();
+        struct SucessReply<'a>(&'a CommitInfo);
 
-        r.update(format!(
-            "✅ Network reset completed successfully with commit:\n`{commit}`",
-        ))
-        .await?;
+        impl std::fmt::Display for SucessReply<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(
+                    f,
+                    "✅ Network reset completed successfully with commit:\n{}\n\n{}",
+                    DisplayFullCommit(self.0),
+                    self.0.html_url
+                )
+            }
+        }
+
+        let success_reply = SucessReply(&commit_info).to_string();
+
+        {
+            let mut state_file = self.state_file.lock().unwrap();
+            state_file.latest_data.last_commit_info = Some(commit_info);
+            state_file.save()?;
+        }
+
+        r.update(success_reply).await?;
         Ok(())
     }
 
@@ -237,6 +283,84 @@ impl State {
     pub fn check_auth(&self, msg: &Message) -> bool {
         !self.authentication_enabled || self.allowed_groups.contains(&msg.chat.id.0)
     }
+
+    async fn get_commit_info(&self, commit: &str) -> Result<CommitInfo> {
+        let commit_sha = self.github_client.get_commit_sha(commit).await?;
+        let commit_info = self.github_client.get_commit_info(&commit_sha).await?;
+        let commit_branches = self.github_client.get_commit_branches(&commit_sha).await?;
+
+        Ok(CommitInfo {
+            sha: commit_sha,
+            html_url: commit_info.html_url,
+            message: commit_info.message,
+            branches: commit_branches,
+        })
+    }
+}
+
+struct StateFile {
+    path: PathBuf,
+    latest_data: StateFileData,
+}
+
+impl StateFile {
+    pub fn load(path: &str) -> Result<Self> {
+        let path = Path::new(path);
+        let latest_data = if path.exists() {
+            let content = std::fs::read_to_string(path).context("failed to read state file")?;
+            serde_json::from_str(&content).context("failed to parse state file")?
+        } else {
+            StateFileData::default()
+        };
+
+        Ok(Self {
+            path: path.to_owned(),
+            latest_data,
+        })
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let content = serde_json::to_string_pretty(&self.latest_data)
+            .context("failed to serialize state file")?;
+        std::fs::write(&self.path, content).context("failed to write state file")
+    }
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(default)]
+struct StateFileData {
+    last_commit_info: Option<CommitInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub html_url: String,
+    pub message: String,
+    pub branches: Vec<String>,
+}
+
+struct DisplayFullCommit<'a>(&'a CommitInfo);
+
+impl std::fmt::Display for DisplayFullCommit<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.sha)?;
+
+        if !self.0.branches.is_empty() {
+            let mut first = true;
+            write!(f, " (branch: ")?;
+            for name in &self.0.branches {
+                write!(
+                    f,
+                    "{}`{name}`",
+                    if std::mem::take(&mut first) { "" } else { ", " }
+                )?;
+            }
+            write!(f, ")")?;
+        }
+
+        Ok(())
+    }
 }
 
 fn parse_config_value_path(s: &str) -> Result<Vec<String>> {
@@ -266,7 +390,7 @@ impl LongReply {
         let chat_id = msg.chat.id;
         let reply = bot
             .send_message(chat_id, text)
-            .reply_to(&msg)
+            .reply_to(msg)
             .markdown()
             .await?;
         Ok(Self {
@@ -287,7 +411,7 @@ impl LongReply {
 
 pub enum Reply {
     Timings(StateTimings),
-    Commit(String),
+    Commit(CommitInfo),
     Account {
         address: StdAddr,
         balance: DecimalTokens,
@@ -312,7 +436,12 @@ impl std::fmt::Display for Reply {
                 write!(f, "Timings:\n```json\n{reply_data}\n```")
             }
             Self::Commit(commit) => {
-                write!(f, "Current deployed commit:\n`{commit}`")
+                write!(
+                    f,
+                    "Current deployed commit:\n{}\n\n{}",
+                    DisplayFullCommit(commit),
+                    commit.html_url
+                )
             }
             Self::Account {
                 address,

@@ -33,7 +33,7 @@ pub async fn handle_command(
                 let commit = commit.trim();
                 let commit = if commit.is_empty() { "master" } else { commit };
 
-                if let Err(e) = state.reset_network(bot.clone(), &msg, &commit).await {
+                if let Err(e) = state.reset_network(bot.clone(), &msg, commit).await {
                     tracing::error!("request failed: {e:?}");
 
                     let reply = format!("Failed to handle reset:\n```\n{e}\n```");
@@ -46,7 +46,7 @@ pub async fn handle_command(
             });
             return Ok(());
         }
-        Command::GetCommit => Ok(state.get_saved_commit()),
+        Command::GetCommit => state.get_saved_commit(),
         Command::SetNodeConfig(expr) => {
             if state.check_auth(&msg) {
                 state.set_node_config(&expr).await

@@ -10,10 +10,12 @@ pub struct Settings {
     pub rpc_url: String,
     pub inventory_file: String,
     pub tycho_config_file: String,
+    pub github_token: String,
     pub reset_playbook: String,
     pub setup_playbook: String,
     pub allowed_groups: Vec<i64>,
     pub authentication_enabled: bool,
+    pub state_file: String,
 }
 
 pub fn load_settings() -> Result<Settings> {
@@ -24,10 +26,12 @@ pub fn load_settings() -> Result<Settings> {
         rpc_url: get_env("RPC_URL")?,
         inventory_file: get_env("INVENTORY_FILE")?,
         tycho_config_file: get_env("TYCHO_CONFIG_FILE")?,
+        github_token: get_env("GITHUB_TOKEN")?,
         reset_playbook: get_env("RESET_PLAYBOOK")?,
         setup_playbook: get_env("SETUP_PLAYBOOK")?,
         allowed_groups: get_env::<List<i64>>("ALLOWED_GROUPS")?.0,
         authentication_enabled: get_env("AUTHENTICATION_ENABLED")?,
+        state_file: get_env("STATE_FILE")?,
     })
 }
 

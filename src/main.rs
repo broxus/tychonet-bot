@@ -13,6 +13,7 @@ use crate::state::State;
 
 mod commands;
 mod config;
+mod github_client;
 mod handlers;
 mod jrpc_client;
 mod settings;
@@ -34,7 +35,7 @@ async fn main() -> Result<()> {
 
     tracing::info!("bot started");
 
-    let state = Arc::new(State::new(&settings)?);
+    let state = Arc::new(State::new(&settings).await?);
 
     Command::repl(bot, move |bot, msg, cmd| {
         handle_command(bot, msg, cmd, state.clone())

@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use similar::{Change, ChangeTag, TextDiff};
+use similar::{ChangeTag, TextDiff};
 
 pub struct Config {
     path: PathBuf,
