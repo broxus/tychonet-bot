@@ -134,6 +134,12 @@ impl std::fmt::Display for ConfigDiff {
                 }
             };
 
+            if let Some(lines) = lines_after_change {
+                if lines > stack.len() {
+                    write!(f, " ...")?;
+                }
+            }
+
             while let Some(change) = stack.pop_front() {
                 write!(f, " {}", change)?;
             }
