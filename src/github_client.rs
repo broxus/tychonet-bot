@@ -16,19 +16,19 @@ impl GithubClient {
     pub fn new(token: &str, org: &str, repo: &str) -> Result<Self> {
         let base_url = format!("https://api.github.com/repos/{org}/{repo}/").parse()?;
 
-        let mut headers = reqwest::header::HeaderMap::new();
+        let mut headers = header::HeaderMap::new();
 
         let mut bearer_header = reqwest::header::HeaderValue::try_from(format!("Bearer {token}"))?;
         bearer_header.set_sensitive(true);
 
-        headers.insert(reqwest::header::AUTHORIZATION, bearer_header);
+        headers.insert(header::AUTHORIZATION, bearer_header);
         headers.insert(
-            reqwest::header::USER_AGENT,
-            reqwest::header::HeaderValue::from_static(USER_AGENT),
+            header::USER_AGENT,
+            header::HeaderValue::from_static(USER_AGENT),
         );
         headers.insert(
             "X-GitHub-Api-Version",
-            reqwest::header::HeaderValue::from_static("2022-11-28"),
+            header::HeaderValue::from_static("2022-11-28"),
         );
 
         let client = reqwest::ClientBuilder::new()

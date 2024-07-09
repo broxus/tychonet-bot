@@ -4,7 +4,7 @@ use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 
 use crate::commands::Command;
-use crate::state::{Reply, State};
+use crate::state::State;
 use crate::util::{SendMessageExt, WithLinkPreview};
 
 pub async fn handle_command(
@@ -47,14 +47,10 @@ pub async fn handle_command(
             return Ok(());
         }
         Command::GetCommit => state.get_saved_commit(),
-        Command::SetNodeConfig(expr) => {
-            if state.check_auth(&msg) {
-                state.set_node_config(&expr).await
-            } else {
-                Ok(Reply::AccessDenied)
-            }
-        }
-        Command::GetNodeConfig(path) => state.get_node_config(&path).await,
+        Command::SetNodeConfig(expr) => state.set_node_config(&msg, &expr),
+        Command::GetNodeConfig(expr) => state.get_node_config(&expr),
+        Command::SetZeroState(expr) => state.set_zerostate(&msg, &expr),
+        Command::GetZeroState(expr) => state.get_zerostate(&expr),
         Command::Give { address, amount } => {
             // TODO
             tracing::info!("{}{}", address, amount);

@@ -25,7 +25,8 @@ pub struct State {
     jrpc_client: JrpcClient,
     github_client: GithubClient,
     inventory_file: String,
-    tycho_config_file: String,
+    node_config_file: String,
+    zerostate_file: String,
     reset_playbook: String,
     setup_playbook: String,
     allowed_groups: HashSet<i64>,
@@ -55,7 +56,8 @@ impl State {
             jrpc_client: JrpcClient::new(&settings.rpc_url)?,
             github_client,
             inventory_file: settings.inventory_file.clone(),
-            tycho_config_file: settings.tycho_config_file.clone(),
+            node_config_file: settings.node_config_file.clone(),
+            zerostate_file: settings.zerostate_file.clone(),
             reset_playbook: settings.reset_playbook.clone(),
             setup_playbook: settings.setup_playbook.clone(),
             allowed_groups: settings.allowed_groups.iter().copied().collect(),
@@ -185,9 +187,9 @@ impl State {
             return Ok(());
         }
 
-        struct SucessReply<'a>(&'a CommitInfo);
+        struct SuccessReply<'a>(&'a CommitInfo);
 
-        impl std::fmt::Display for SucessReply<'_> {
+        impl std::fmt::Display for SuccessReply<'_> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 writeln!(f, "✅ Network reset completed successfully!\n")?;
 
@@ -213,7 +215,7 @@ impl State {
             }
         }
 
-        let success_reply = SucessReply(&commit_info).to_string();
+        let success_reply = SuccessReply(&commit_info).to_string();
         let link_preview = LinkPreviewOptions {
             url: commit_info.html_url.clone(),
         };
@@ -270,8 +272,51 @@ impl State {
             .context("Failed to execute setup playbook")
     }
 
-    pub async fn set_node_config(&self, expr: &str) -> Result<Reply> {
-        let mut config = Config::from_file(&self.tycho_config_file)?;
+    pub fn set_node_config(&self, msg: &Message, expr: &str) -> Result<Reply> {
+        if !self.check_auth(msg) {
+            return Ok(Reply::AccessDenied);
+        }
+        self.set_config_impl(&self.node_config_file, expr)
+            .map(Reply::NodeConfigUpdated)
+    }
+
+    pub fn get_node_config(&self, expr: &str) -> Result<Reply> {
+        self.get_config_impl(&self.node_config_file, expr)
+            .map(Reply::NodeConfigParam)
+    }
+
+    pub fn set_zerostate(&self, msg: &Message, expr: &str) -> Result<Reply> {
+        if !self.check_auth(msg) {
+            return Ok(Reply::AccessDenied);
+        }
+        self.set_config_impl(&self.zerostate_file, expr)
+            .map(Reply::ZerostateUpdated)
+    }
+
+    pub fn get_zerostate(&self, expr: &str) -> Result<Reply> {
+        self.get_config_impl(&self.zerostate_file, expr)
+            .map(Reply::ZerostateParam)
+    }
+
+    pub fn check_auth(&self, msg: &Message) -> bool {
+        !self.authentication_enabled || self.allowed_groups.contains(&msg.chat.id.0)
+    }
+
+    async fn get_commit_info(&self, commit: &str) -> Result<CommitInfo> {
+        let commit_sha = self.github_client.get_commit_sha(commit).await?;
+        let commit_info = self.github_client.get_commit_info(&commit_sha).await?;
+        let commit_branches = self.github_client.get_commit_branches(&commit_sha).await?;
+
+        Ok(CommitInfo {
+            sha: commit_sha,
+            html_url: commit_info.html_url,
+            message: commit_info.message,
+            branches: commit_branches,
+        })
+    }
+
+    fn set_config_impl(&self, path: &str, expr: &str) -> Result<ConfigDiff> {
+        let mut config = Config::from_file(path)?;
 
         let expr = expr.trim();
         match expr.strip_prefix("delete") {
@@ -291,31 +336,14 @@ impl State {
             }
         }
 
-        config.save().map(Reply::NodeConfigUpdated)
+        config.save()
     }
 
-    pub async fn get_node_config(&self, path: &str) -> Result<Reply> {
-        let path = parse_config_value_path(path)?;
-        let config = Config::from_file(&self.tycho_config_file)?;
+    fn get_config_impl(&self, path: &str, expr: &str) -> Result<String> {
+        let config = Config::from_file(path)?;
+        let path = parse_config_value_path(expr)?;
         let value = serde_json::to_string_pretty(config.get(&path)?)?;
-        Ok(Reply::NodeConfigParam(value))
-    }
-
-    pub fn check_auth(&self, msg: &Message) -> bool {
-        !self.authentication_enabled || self.allowed_groups.contains(&msg.chat.id.0)
-    }
-
-    async fn get_commit_info(&self, commit: &str) -> Result<CommitInfo> {
-        let commit_sha = self.github_client.get_commit_sha(commit).await?;
-        let commit_info = self.github_client.get_commit_info(&commit_sha).await?;
-        let commit_branches = self.github_client.get_commit_branches(&commit_sha).await?;
-
-        Ok(CommitInfo {
-            sha: commit_sha,
-            html_url: commit_info.html_url,
-            message: commit_info.message,
-            branches: commit_branches,
-        })
+        Ok(value)
     }
 }
 
@@ -401,7 +429,7 @@ impl LongReply {
     fn update(
         &self,
         text: impl Into<String>,
-    ) -> teloxide::requests::JsonRequest<WithLinkPreview<teloxide::payloads::EditMessageText>> {
+    ) -> JsonRequest<WithLinkPreview<teloxide::payloads::EditMessageText>> {
         let req = WithLinkPreview {
             inner: teloxide::payloads::EditMessageText::new(self.chat_id, self.reply_msg_id, text),
             link_preview_options: None,
@@ -426,6 +454,8 @@ pub enum Reply {
     },
     NodeConfigUpdated(ConfigDiff),
     NodeConfigParam(String),
+    ZerostateUpdated(ConfigDiff),
+    ZerostateParam(String),
     AccessDenied,
 }
 
@@ -495,6 +525,12 @@ impl std::fmt::Display for Reply {
                 write!(f, "Node config updated:\n```json\n{msg}\n```")
             }
             Self::NodeConfigParam(config) => {
+                write!(f, "```json\n{config}\n```")
+            }
+            Self::ZerostateUpdated(msg) => {
+                write!(f, "Zerostate config updated:\n```json\n{msg}\n```")
+            }
+            Self::ZerostateParam(config) => {
                 write!(f, "```json\n{config}\n```")
             }
             Self::AccessDenied => {
