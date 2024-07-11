@@ -23,6 +23,10 @@ pub enum Command {
     SetNodeConfig(String),
     #[command(description = "get node config.")]
     GetNodeConfig(String),
+    #[command(description = "set logger config.")]
+    SetLoggerConfig(String),
+    #[command(description = "get logger config.")]
+    GetLoggerConfig(String),
     #[command(description = "set zero state.")]
     SetZeroState(String),
     #[command(description = "get zero state.")]

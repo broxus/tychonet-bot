@@ -26,6 +26,7 @@ pub struct State {
     github_client: GithubClient,
     inventory_file: String,
     node_config_file: String,
+    logger_config_file: String,
     zerostate_file: String,
     reset_playbook: String,
     setup_playbook: String,
@@ -57,6 +58,7 @@ impl State {
             github_client,
             inventory_file: settings.inventory_file.clone(),
             node_config_file: settings.node_config_file.clone(),
+            logger_config_file: settings.logger_config_file.clone(),
             zerostate_file: settings.zerostate_file.clone(),
             reset_playbook: settings.reset_playbook.clone(),
             setup_playbook: settings.setup_playbook.clone(),
@@ -285,6 +287,19 @@ impl State {
             .map(Reply::NodeConfigParam)
     }
 
+    pub fn set_logger_config(&self, msg: &Message, expr: &str) -> Result<Reply> {
+        if !self.check_auth(msg) {
+            return Ok(Reply::AccessDenied);
+        }
+        self.set_config_impl(&self.logger_config_file, expr)
+            .map(Reply::LoggerConfigUpdated)
+    }
+
+    pub fn get_logger_config(&self, expr: &str) -> Result<Reply> {
+        self.get_config_impl(&self.logger_config_file, expr)
+            .map(Reply::LoggerConfigParam)
+    }
+
     pub fn set_zerostate(&self, msg: &Message, expr: &str) -> Result<Reply> {
         if !self.check_auth(msg) {
             return Ok(Reply::AccessDenied);
@@ -454,6 +469,8 @@ pub enum Reply {
     },
     NodeConfigUpdated(ConfigDiff),
     NodeConfigParam(String),
+    LoggerConfigUpdated(ConfigDiff),
+    LoggerConfigParam(String),
     ZerostateUpdated(ConfigDiff),
     ZerostateParam(String),
     AccessDenied,
@@ -525,6 +542,12 @@ impl std::fmt::Display for Reply {
                 write!(f, "Node config updated:\n```json\n{msg}\n```")
             }
             Self::NodeConfigParam(config) => {
+                write!(f, "```json\n{config}\n```")
+            }
+            Self::LoggerConfigUpdated(msg) => {
+                write!(f, "Logger config updated:\n```json\n{msg}\n```")
+            }
+            Self::LoggerConfigParam(config) => {
                 write!(f, "```json\n{config}\n```")
             }
             Self::ZerostateUpdated(msg) => {

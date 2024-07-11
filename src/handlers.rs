@@ -49,6 +49,8 @@ pub async fn handle_command(
         Command::GetCommit => state.get_saved_commit(),
         Command::SetNodeConfig(expr) => state.set_node_config(&msg, &expr),
         Command::GetNodeConfig(expr) => state.get_node_config(&expr),
+        Command::SetLoggerConfig(expr) => state.set_logger_config(&msg, &expr),
+        Command::GetLoggerConfig(expr) => state.get_logger_config(&expr),
         Command::SetZeroState(expr) => state.set_zerostate(&msg, &expr),
         Command::GetZeroState(expr) => state.get_zerostate(&expr),
         Command::Give { address, amount } => {
