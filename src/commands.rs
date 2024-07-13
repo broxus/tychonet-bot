@@ -15,6 +15,10 @@ pub enum Command {
     GetChatId,
     #[command(description = "get network status.")]
     Status,
+    #[command(description = "freeze network reset for some time.")]
+    Freeze(String),
+    #[command(description = "unfreeze network reset.")]
+    Unfreeze,
     #[command(description = "reset network with the commit hash or branch name.")]
     Reset(String),
     #[command(description = "retrieve the current deployed commit.")]

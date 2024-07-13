@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use everscale_types::models::{AccountState, AccountStatus, StdAddr};
@@ -10,6 +11,7 @@ use serde_json::Value;
 use teloxide::prelude::*;
 use teloxide::requests::JsonRequest;
 use teloxide::types::{ChatId, MessageId};
+use tokio::task::AbortHandle;
 
 use crate::commands::{Currency, DecimalTokens};
 use crate::config::{Config, ConfigDiff};
@@ -17,7 +19,9 @@ use crate::github_client::GithubClient;
 use crate::jrpc_client;
 use crate::jrpc_client::{JrpcClient, StateTimings};
 use crate::settings::Settings;
-use crate::util::{LinkPreviewOptions, SendMessageExt, WithLinkPreview, WithLinkPreviewSetters};
+use crate::util::{
+    now_sec, LinkPreviewOptions, SendMessageExt, WithLinkPreview, WithLinkPreviewSetters,
+};
 
 const DEFAULT_BRANCH: &str = "master";
 
@@ -34,10 +38,11 @@ pub struct State {
     authentication_enabled: bool,
     state_file: Mutex<StateFile>,
     reset_running: AtomicBool,
+    unfreeze_notify: Mutex<Option<AbortHandle>>,
 }
 
 impl State {
-    pub async fn new(settings: &Settings) -> Result<Self> {
+    pub async fn new(bot: Bot, settings: &Settings) -> Result<Arc<Self>> {
         let github_client = GithubClient::new(&settings.github_token, "broxus", "tycho")?;
 
         let mut state_file = StateFile::load(&settings.state_file)?;
@@ -53,7 +58,13 @@ impl State {
             state_file.save()?;
         }
 
-        Ok(Self {
+        let unfreeze_timestamp = state_file
+            .latest_data
+            .reset_frozen
+            .as_ref()
+            .map(|f| f.timestamp_until);
+
+        let state = Arc::new(Self {
             jrpc_client: JrpcClient::new(&settings.rpc_url)?,
             github_client,
             inventory_file: settings.inventory_file.clone(),
@@ -66,7 +77,16 @@ impl State {
             authentication_enabled: settings.authentication_enabled,
             state_file: Mutex::new(state_file),
             reset_running: AtomicBool::new(false),
-        })
+            unfreeze_notify: Mutex::new(None),
+        });
+
+        if let Some(at) = unfreeze_timestamp {
+            let duration = Duration::from_secs(at.saturating_sub(now_sec()));
+            *state.unfreeze_notify.lock().unwrap() =
+                Some(tokio::spawn(state.clone().unfreeze_task(bot, duration)).abort_handle());
+        }
+
+        Ok(state)
     }
 
     pub async fn get_status(&self) -> Result<Reply> {
@@ -113,6 +133,72 @@ impl State {
         })
     }
 
+    pub fn freeze(self: &Arc<Self>, bot: &Bot, msg: &Message, expr: &str) -> Result<Reply> {
+        if !self.check_auth(msg) {
+            return Ok(Reply::AccessDenied);
+        }
+
+        let (duration, reason) = match expr.split_once(':') {
+            Some((duration, reason)) => {
+                let duration = humantime::parse_duration(duration.trim())?;
+                (duration, Some(reason.trim().to_owned()))
+            }
+            None => {
+                let duration = humantime::parse_duration(expr.trim())?;
+                (duration, None)
+            }
+        };
+        anyhow::ensure!(
+            duration <= Duration::from_secs(86400),
+            "Cannot freeze for more than 24 hours"
+        );
+
+        let mut state_file = self.state_file.lock().unwrap();
+        if let Some(frozen) = &state_file.latest_data.reset_frozen {
+            return Ok(Reply::ResetFrozen(frozen.clone()));
+        }
+
+        let timestamp_until = now_sec() + duration.as_secs();
+        state_file.latest_data.reset_frozen = Some(ResetFrozen {
+            reason,
+            timestamp_until,
+            chat_id: msg.chat.id,
+            message_id: msg.id,
+            message_thread_id: msg.thread_id,
+        });
+        state_file.save()?;
+
+        {
+            let mut notify = self.unfreeze_notify.lock().unwrap();
+            if let Some(notify) = notify.take() {
+                notify.abort();
+            }
+            *notify = Some(
+                tokio::spawn(self.clone().unfreeze_task(bot.clone(), duration)).abort_handle(),
+            );
+        }
+
+        Ok(Reply::Freeze)
+    }
+
+    pub fn unfreeze(&self, msg: &Message) -> Result<Reply> {
+        if !self.check_auth(msg) {
+            return Ok(Reply::AccessDenied);
+        }
+
+        let mut state_file = self.state_file.lock().unwrap();
+        if state_file.latest_data.reset_frozen.is_some() {
+            state_file.latest_data.reset_frozen = None;
+            state_file.save()?;
+        }
+
+        if let Some(notify) = self.unfreeze_notify.lock().unwrap().take() {
+            notify.abort();
+        }
+
+        Ok(Reply::Unfreeze)
+    }
+
     pub fn get_saved_commit(&self) -> Result<Reply> {
         let state_file = self.state_file.lock().unwrap();
         state_file
@@ -134,6 +220,33 @@ impl State {
 
         if !self.check_auth(msg) {
             bot.send_message(msg.chat.id, Reply::AccessDenied.to_string())
+                .reply_to(msg)
+                .await?;
+            return Ok(());
+        }
+
+        'frozen: {
+            let frozen = {
+                let mut state_file = self.state_file.lock().unwrap();
+                let Some(frozen) = &state_file.latest_data.reset_frozen else {
+                    break 'frozen;
+                };
+
+                if now_sec() >= frozen.timestamp_until {
+                    if let Some(notify) = self.unfreeze_notify.lock().unwrap().take() {
+                        notify.abort();
+                    }
+
+                    // Unfreeze on timestamp reached
+                    state_file.latest_data.reset_frozen = None;
+                    state_file.save()?;
+                    break 'frozen;
+                }
+
+                frozen.clone()
+            };
+
+            bot.send_message(msg.chat.id, Reply::ResetFrozen(frozen).to_string())
                 .reply_to(msg)
                 .await?;
             return Ok(());
@@ -360,6 +473,30 @@ impl State {
         let value = serde_json::to_string_pretty(config.get(&path)?)?;
         Ok(value)
     }
+
+    async fn unfreeze_task(self: Arc<Self>, bot: Bot, duration: Duration) {
+        tokio::time::sleep(duration).await;
+
+        let frozen = {
+            let mut state_file = self.state_file.lock().unwrap();
+            let Some(frozen) = state_file.latest_data.reset_frozen.take() else {
+                return;
+            };
+
+            if let Err(e) = state_file.save() {
+                tracing::error!("Failed to save state file: {e}");
+            }
+
+            frozen
+        };
+
+        let mut msg = bot.send_message(frozen.chat_id, Reply::Unfreeze.to_string());
+        msg.reply_to_message_id = Some(frozen.message_id);
+        msg.message_thread_id = frozen.message_thread_id;
+        if let Err(e) = msg.await {
+            tracing::error!("Failed to send unfreeze message: {e}");
+        }
+    }
 }
 
 struct StateFile {
@@ -394,6 +531,7 @@ impl StateFile {
 #[serde(default)]
 struct StateFileData {
     last_commit_info: Option<CommitInfo>,
+    reset_frozen: Option<ResetFrozen>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,6 +540,16 @@ pub struct CommitInfo {
     pub html_url: String,
     pub message: String,
     pub branches: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetFrozen {
+    pub reason: Option<String>,
+    pub timestamp_until: u64,
+
+    pub chat_id: ChatId,
+    pub message_id: MessageId,
+    pub message_thread_id: Option<i32>,
 }
 
 fn parse_config_value_path(s: &str) -> Result<Vec<String>> {
@@ -467,6 +615,8 @@ pub enum Reply {
         value: Value,
         param: i32,
     },
+    Freeze,
+    Unfreeze,
     NodeConfigUpdated(ConfigDiff),
     NodeConfigParam(String),
     LoggerConfigUpdated(ConfigDiff),
@@ -474,6 +624,7 @@ pub enum Reply {
     ZerostateUpdated(ConfigDiff),
     ZerostateParam(String),
     AccessDenied,
+    ResetFrozen(ResetFrozen),
 }
 
 impl Reply {
@@ -538,6 +689,12 @@ impl std::fmt::Display for Reply {
                     "Global ID: {global_id}\nKey Block Seqno: {seqno}\n\nParam {param}:\n```json\n{value_str}\n```"
                 )
             }
+            Self::Freeze => {
+                write!(f, "Network reset is now frozen")
+            }
+            Self::Unfreeze => {
+                write!(f, "Network reset is now available")
+            }
             Self::NodeConfigUpdated(msg) => {
                 write!(f, "Node config updated:\n```json\n{msg}\n```")
             }
@@ -558,6 +715,22 @@ impl std::fmt::Display for Reply {
             }
             Self::AccessDenied => {
                 write!(f, "👮‍♀️ Access denied")
+            }
+            Self::ResetFrozen(frozen) => {
+                let time_remaining =
+                    Duration::from_secs(frozen.timestamp_until.saturating_sub(now_sec()));
+
+                write!(
+                    f,
+                    "❄️ Network reset is frozen\n⏰ Time remaining: {}",
+                    humantime::format_duration(time_remaining),
+                )?;
+
+                if let Some(reason) = &frozen.reason {
+                    write!(f, "\n\n> {reason}")?;
+                }
+
+                Ok(())
             }
         }
     }

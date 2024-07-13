@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -35,7 +34,7 @@ async fn main() -> Result<()> {
 
     tracing::info!("bot started");
 
-    let state = Arc::new(State::new(&settings).await?);
+    let state = State::new(bot.clone(), &settings).await?;
 
     Command::repl(bot, move |bot, msg, cmd| {
         handle_command(bot, msg, cmd, state.clone())

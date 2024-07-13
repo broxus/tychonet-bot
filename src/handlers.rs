@@ -28,6 +28,8 @@ pub async fn handle_command(
             return Ok(());
         }
         Command::Status => state.get_status().await,
+        Command::Freeze(expr) => state.freeze(&bot, &msg, &expr),
+        Command::Unfreeze => state.unfreeze(&msg),
         Command::Reset(commit) => {
             tokio::spawn(async move {
                 let commit = commit.trim();

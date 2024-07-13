@@ -7,6 +7,7 @@ edition = "2021"
 anyhow = "1.0"
 bigdecimal = "0.4"
 dotenvy = "0.15.7"
+humantime = "2.1"
 num-format = "0.4"
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
