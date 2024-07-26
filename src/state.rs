@@ -20,7 +20,8 @@ use crate::jrpc_client;
 use crate::jrpc_client::{JrpcClient, StateTimings};
 use crate::settings::Settings;
 use crate::util::{
-    now_sec, LinkPreviewOptions, SendMessageExt, WithLinkPreview, WithLinkPreviewSetters,
+    now_sec, Emoji, LinkPreviewOptions, ReactionType, SendMessageExt, SetMessageReaction,
+    WithLinkPreview, WithLinkPreviewSetters,
 };
 
 const DEFAULT_BRANCH: &str = "master";
@@ -275,6 +276,7 @@ impl State {
             tracing::error!("Gate update failed: {e}");
             r.update(format!("Gate update failed:\n```\n{e}\n```"))
                 .await?;
+            r.react(Emoji::Clown).await?;
             return Ok(());
         }
 
@@ -287,6 +289,7 @@ impl State {
             tracing::error!("Reset playbook execution failed: {e}");
             r.update(format!("Reset playbook execution failed:\n```\n{e}\n```"))
                 .await?;
+            r.react(Emoji::Clown).await?;
             return Ok(());
         }
 
@@ -299,6 +302,7 @@ impl State {
             tracing::error!("Setup playbook execution failed: {e}");
             r.update(format!("Setup playbook execution failed:\n```\n{e}\n```"))
                 .await?;
+            r.react(Emoji::Clown).await?;
             return Ok(());
         }
 
@@ -344,6 +348,8 @@ impl State {
         r.update(success_reply)
             .link_preview_options(Some(link_preview))
             .await?;
+
+        r.react(Emoji::Hotdog).await?;
         Ok(())
     }
 
@@ -571,6 +577,7 @@ fn parse_config_value_path(s: &str) -> Result<Vec<String>> {
 struct LongReply {
     bot: Bot,
     chat_id: ChatId,
+    original_msg_id: MessageId,
     reply_msg_id: MessageId,
 }
 
@@ -582,9 +589,11 @@ impl LongReply {
             .reply_to(msg)
             .markdown()
             .await?;
+
         Ok(Self {
             bot,
             chat_id,
+            original_msg_id: msg.id,
             reply_msg_id: reply.id,
         })
     }
@@ -598,6 +607,17 @@ impl LongReply {
             link_preview_options: None,
         };
         JsonRequest::new(self.bot.clone(), req).markdown()
+    }
+
+    fn react(&self, emoji: Emoji) -> JsonRequest<SetMessageReaction> {
+        let req = SetMessageReaction {
+            chat_id: self.chat_id.into(),
+            message_id: self.original_msg_id,
+            reaction: vec![ReactionType::Emoji {
+                emoji: emoji.to_string(),
+            }],
+        };
+        JsonRequest::new(self.bot.clone(), req)
     }
 }
 

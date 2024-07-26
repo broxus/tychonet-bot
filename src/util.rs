@@ -7,6 +7,42 @@ pub fn now_sec() -> u64 {
         .as_secs()
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum Emoji {
+    Clown,
+    Hotdog,
+}
+
+impl std::fmt::Display for Emoji {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Clown => "🤡",
+            Self::Hotdog => "🌭",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SetMessageReaction {
+    pub chat_id: teloxide::types::Recipient,
+    #[serde(flatten)]
+    pub message_id: teloxide::types::MessageId,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reaction: Vec<ReactionType>,
+}
+
+impl teloxide::requests::Payload for SetMessageReaction {
+    type Output = teloxide::types::True;
+
+    const NAME: &'static str = "SetMessageReaction";
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReactionType {
+    Emoji { emoji: String },
+}
+
 pub trait SendMessageExt {
     fn reply_to(self, message: &teloxide::prelude::Message) -> Self;
 
