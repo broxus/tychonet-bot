@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use everscale_types::models::{AccountState, AccountStatus, StdAddr};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use teloxide::payloads::{DeleteMessage, EditMessageText};
 use teloxide::prelude::*;
 use teloxide::requests::JsonRequest;
 use teloxide::types::{ChatId, MessageId};
@@ -263,42 +264,56 @@ impl State {
             ResetGuard(&self.reset_running)
         };
 
-        let r = LongReply::begin(bot, msg, "Starting network reset...").await?;
+        let mut r = LongReply::begin(bot, msg, "Starting network reset...").await?;
 
         let commit_info = self.get_commit_info(commit).await?;
 
-        r.update("🔄 Updating gate...").await?;
+        let update = r.update("🔄 Updating gate...").await?;
+        update.update().await?;
 
         let gate_update_output = self.run_gate_update().await?;
         if !gate_update_output.status.success() {
             let e = String::from_utf8_lossy(&gate_update_output.stderr).to_string();
             tracing::error!("Gate update failed: {e}");
-            r.update(format!("Gate update failed:\n```\n{e}\n```"))
+            let update = r
+                .update(format!("Gate update failed:\n```\n{e}\n```"))
                 .await?;
+            update.update().await?;
+
             return Ok(());
         }
 
-        r.update("🔄 Gate updated. Running reset playbook...")
+        let update = r
+            .update("🔄 Gate updated. Running reset playbook...")
             .await?;
+        update.update().await?;
 
         let reset_output = self.run_ansible_reset(commit).await?;
         if !reset_output.status.success() {
             let e = String::from_utf8_lossy(&reset_output.stderr).to_string();
             tracing::error!("Reset playbook execution failed: {e}");
-            r.update(format!("Reset playbook execution failed:\n```\n{e}\n```"))
+            let update = r
+                .update(format!("Reset playbook execution failed:\n```\n{e}\n```"))
                 .await?;
+            update.update().await?;
+
             return Ok(());
         }
 
-        r.update("🔄 Reset completed. Running setup playbook...")
+        let update = r
+            .update("🔄 Reset completed. Running setup playbook...")
             .await?;
+        update.update().await?;
 
         let setup_output = self.run_ansible_setup(commit).await?;
         if !setup_output.status.success() {
             let e = String::from_utf8_lossy(&setup_output.stderr).to_string();
             tracing::error!("Setup playbook execution failed: {e}");
-            r.update(format!("Setup playbook execution failed:\n```\n{e}\n```"))
+            let update = r
+                .update(format!("Setup playbook execution failed:\n```\n{e}\n```"))
                 .await?;
+            update.update().await?;
+
             return Ok(());
         }
 
@@ -341,9 +356,11 @@ impl State {
             state_file.save()?;
         }
 
-        r.update(success_reply)
-            .link_preview_options(Some(link_preview))
-            .await?;
+        let update = r.update(success_reply).await?;
+        let (req, update) = update.consume();
+        let message = req.link_preview_options(Some(link_preview)).await?;
+        update.update(message.id);
+
         Ok(())
     }
 
@@ -572,6 +589,7 @@ struct LongReply {
     bot: Bot,
     chat_id: ChatId,
     reply_msg_id: MessageId,
+    prev_message_id: Arc<Mutex<MessageId>>,
 }
 
 impl LongReply {
@@ -585,19 +603,60 @@ impl LongReply {
         Ok(Self {
             bot,
             chat_id,
-            reply_msg_id: reply.id,
+            reply_msg_id: msg.id,
+            prev_message_id: Arc::new(Mutex::new(reply.id)),
         })
     }
 
-    fn update(
-        &self,
-        text: impl Into<String>,
-    ) -> JsonRequest<WithLinkPreview<teloxide::payloads::EditMessageText>> {
+    // deletes previous message and sends new one
+    async fn update(&mut self, text: impl Into<String>) -> Result<Update> {
+        let prev_id = *self.prev_message_id.lock().unwrap();
+        JsonRequest::new(self.bot.clone(), DeleteMessage::new(self.chat_id, prev_id)).await?;
+
         let req = WithLinkPreview {
-            inner: teloxide::payloads::EditMessageText::new(self.chat_id, self.reply_msg_id, text),
+            inner: EditMessageText::new(self.chat_id, self.reply_msg_id, text),
             link_preview_options: None,
         };
-        JsonRequest::new(self.bot.clone(), req).markdown()
+        let notifier = UpdateNotifier(Arc::clone(&self.prev_message_id));
+        let update = Update {
+            inner: JsonRequest::new(self.bot.clone(), req),
+            notifier,
+        };
+
+        Ok(update)
+    }
+}
+
+#[must_use]
+struct Update {
+    inner: JsonRequest<WithLinkPreview<EditMessageText>>,
+    notifier: UpdateNotifier,
+}
+
+impl Update {
+    pub fn consume(
+        self,
+    ) -> (
+        JsonRequest<WithLinkPreview<EditMessageText>>,
+        UpdateNotifier,
+    ) {
+        (self.inner, self.notifier)
+    }
+
+    pub async fn update(self) -> Result<()> {
+        let new_id = self.inner.await?;
+        self.notifier.update(new_id.id);
+
+        Ok(())
+    }
+}
+
+#[must_use = "`update` must be called"]
+struct UpdateNotifier(Arc<Mutex<MessageId>>);
+
+impl UpdateNotifier {
+    pub fn update(self, new_id: MessageId) {
+        *self.0.lock().unwrap() = new_id;
     }
 }
 
