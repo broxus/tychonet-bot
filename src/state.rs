@@ -296,6 +296,7 @@ impl State {
         r.update("🔄 Reset completed. Running setup playbook...")
             .await?;
 
+        let start = std::time::Instant::now();
         let setup_output = self.run_ansible_setup(commit).await?;
         if !setup_output.status.success() {
             let e = String::from_utf8_lossy(&setup_output.stderr).to_string();
@@ -306,21 +307,28 @@ impl State {
             return Ok(());
         }
 
-        struct SuccessReply<'a>(&'a CommitInfo);
+        struct SuccessReply<'a> {
+            commit_info: &'a CommitInfo,
+            took: Duration,
+        }
 
         impl std::fmt::Display for SuccessReply<'_> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                writeln!(f, "✅ Network reset completed successfully!\n")?;
+                writeln!(f, "✅ Network reset completed successfully!")?;
+                let duration = humantime::format_duration(self.took);
+                writeln!(f, "⏲️ Took: {duration}\n")?;
 
-                for line in self.0.message.lines() {
+                let info = self.commit_info;
+
+                for line in info.message.lines() {
                     writeln!(f, "> {line}")?;
                 }
-                writeln!(f, "Commit: `{}`\n", self.0.sha)?;
+                writeln!(f, "Commit: `{}`\n", info.sha)?;
 
-                if !self.0.branches.is_empty() {
+                if !info.branches.is_empty() {
                     let mut first = true;
                     write!(f, "Branch: ")?;
-                    for name in &self.0.branches {
+                    for name in &info.branches {
                         write!(
                             f,
                             "{}`{name}`",
@@ -330,11 +338,16 @@ impl State {
                     writeln!(f, "\n")?;
                 }
 
-                f.write_str(&self.0.html_url)
+                f.write_str(&info.html_url)
             }
         }
 
-        let success_reply = SuccessReply(&commit_info).to_string();
+        let success_reply = SuccessReply {
+            commit_info: &commit_info,
+            took: start.elapsed(),
+        }
+            .to_string();
+
         let link_preview = LinkPreviewOptions {
             url: commit_info.html_url.clone(),
         };
