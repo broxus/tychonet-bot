@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -10,7 +11,7 @@ use everscale_types::models::{AccountState, AccountStatus, StdAddr};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use teloxide::prelude::*;
-use teloxide::requests::JsonRequest;
+use teloxide::requests::{JsonRequest, MultipartRequest};
 use teloxide::types::{ChatId, MessageId};
 use tokio::task::AbortHandle;
 
@@ -281,7 +282,7 @@ impl State {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let elapsed_secs = self.started_at.elapsed().as_secs();
                 let duration = humantime::format_duration(Duration::from_secs(elapsed_secs));
-                writeln!(f, "⏰ Took: {duration}\n")?;
+                writeln!(f, "⏰ Elapsed: {duration}\n")?;
 
                 let info = self.commit_info;
 
@@ -319,6 +320,29 @@ impl State {
             }
         }
 
+        impl LongReply {
+            async fn reply_error(
+                &self,
+                body: ReplyText<'_>,
+                title: &str,
+                error: String,
+            ) -> Result<()> {
+                let (title, file) = if error.len() <= 256 {
+                    (format!("🟥 {title}:\n```\n{error}\n```\n"), None)
+                } else {
+                    (format!("🟥 {title}"), Some(error))
+                };
+
+                self.update(body.with_title(title)).await?;
+                if let Some(file) = file {
+                    self.send_document("error.txt", file).await?;
+                }
+
+                self.react(Emoji::Clown).await?;
+                Ok(())
+            }
+        }
+
         let commit_info = self.get_commit_info(&params.commit).await?;
         let reply_body = ReplyText {
             commit_info: &commit_info,
@@ -339,9 +363,8 @@ impl State {
         if !gate_update_output.status.success() {
             let e = String::from_utf8_lossy(&gate_update_output.stderr).to_string();
             tracing::error!("Gate update failed: {e}");
-            r.update(reply_body.with_title(format!("🟥 Gate update failed:\n```\n{e}\n```\n")))
-                .await?;
-            r.react(Emoji::Clown).await?;
+
+            r.reply_error(reply_body, "Gate update failed", e).await?;
             return Ok(());
         }
 
@@ -350,13 +373,11 @@ impl State {
 
         let reset_output = self.run_ansible_reset(&params.commit).await?;
         if !reset_output.status.success() {
-            let e = String::from_utf8_lossy(&reset_output.stderr).to_string();
+            let e = String::from_utf8_lossy(&reset_output.stdout).to_string();
             tracing::error!("Reset playbook execution failed: {e}");
-            r.update(reply_body.with_title(format!(
-                "🟥 Reset playbook execution failed:\n```\n{e}\n```\n"
-            )))
-            .await?;
-            r.react(Emoji::Clown).await?;
+
+            r.reply_error(reply_body, "Reset playbook execution failed", e)
+                .await?;
             return Ok(());
         }
 
@@ -365,13 +386,11 @@ impl State {
 
         let setup_output = self.run_ansible_setup(&params).await?;
         if !setup_output.status.success() {
-            let e = String::from_utf8_lossy(&setup_output.stderr).to_string();
+            let e = String::from_utf8_lossy(&setup_output.stdout).to_string();
             tracing::error!("Setup playbook execution failed: {e}");
-            r.update(reply_body.with_title(format!(
-                "🟥 Setup playbook execution failed:\n```\n{e}\n```\n"
-            )))
-            .await?;
-            r.react(Emoji::Clown).await?;
+
+            r.reply_error(reply_body, "Setup playbook execution failed", e)
+                .await?;
             return Ok(());
         }
 
@@ -667,6 +686,7 @@ struct LongReply {
     chat_id: ChatId,
     original_msg_id: MessageId,
     reply_msg_id: MessageId,
+    reply_thread_id: Option<i32>,
 }
 
 impl LongReply {
@@ -683,6 +703,7 @@ impl LongReply {
             chat_id,
             original_msg_id: msg.id,
             reply_msg_id: reply.id,
+            reply_thread_id: reply.thread_id,
         })
     }
 
@@ -699,6 +720,18 @@ impl LongReply {
             link_preview_options: None,
         };
         JsonRequest::new(self.bot.clone(), req).markdown()
+    }
+
+    fn send_document(
+        &self,
+        name: impl Into<Cow<'static, str>>,
+        error: String,
+    ) -> MultipartRequest<teloxide::payloads::SendDocument> {
+        let document = teloxide::types::InputFile::memory(error).file_name(name);
+        let mut req = self.bot.send_document(self.chat_id, document);
+        req.reply_to_message_id = Some(self.reply_msg_id);
+        req.message_thread_id = self.reply_thread_id;
+        req
     }
 
     fn react(&self, emoji: Emoji) -> JsonRequest<SetMessageReaction> {

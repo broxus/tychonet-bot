@@ -75,6 +75,18 @@ impl SendMessageExt for teloxide::requests::JsonRequest<teloxide::payloads::Edit
     }
 }
 
+impl SendMessageExt for teloxide::requests::JsonRequest<teloxide::payloads::SendDocument> {
+    fn reply_to(mut self, message: &teloxide::prelude::Message) -> Self {
+        self.reply_to_message_id = Some(message.id);
+        self.message_thread_id = message.thread_id;
+        self
+    }
+
+    fn markdown(self) -> Self {
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WithLinkPreview<T> {
     #[serde(flatten)]

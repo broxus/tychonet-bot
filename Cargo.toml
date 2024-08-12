@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 bigdecimal = "0.4"
+bytes = "1.4"
 dotenvy = "0.15.7"
 humantime = "2.1"
 num-format = "0.4"

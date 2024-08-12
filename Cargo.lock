@@ -2176,6 +2176,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bigdecimal",
+ "bytes",
  "dotenvy",
  "everscale-types",
  "humantime",
