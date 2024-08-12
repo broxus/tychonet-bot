@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -210,7 +211,7 @@ impl State {
             .context("no commit info saved")
     }
 
-    pub async fn reset_network(&self, bot: Bot, msg: &Message, commit: &str) -> Result<()> {
+    pub async fn reset_network(&self, bot: Bot, msg: &Message, params: ResetParams) -> Result<()> {
         struct ResetGuard<'a>(&'a AtomicBool);
 
         impl Drop for ResetGuard<'_> {
@@ -278,8 +279,9 @@ impl State {
 
         impl std::fmt::Display for ReplyText<'_> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                let duration = humantime::format_duration(self.started_at.elapsed());
-                writeln!(f, "⏲️ Took: {duration}\n")?;
+                let elapsed_secs = self.started_at.elapsed().as_secs();
+                let duration = humantime::format_duration(Duration::from_secs(elapsed_secs));
+                writeln!(f, "⏰ Took: {duration}\n")?;
 
                 let info = self.commit_info;
 
@@ -317,7 +319,7 @@ impl State {
             }
         }
 
-        let commit_info = self.get_commit_info(commit).await?;
+        let commit_info = self.get_commit_info(&params.commit).await?;
         let reply_body = ReplyText {
             commit_info: &commit_info,
             started_at: Instant::now(),
@@ -346,7 +348,7 @@ impl State {
         r.update(reply_body.with_title("🔄 Gate updated. Running reset playbook..."))
             .await?;
 
-        let reset_output = self.run_ansible_reset(commit).await?;
+        let reset_output = self.run_ansible_reset(&params.commit).await?;
         if !reset_output.status.success() {
             let e = String::from_utf8_lossy(&reset_output.stderr).to_string();
             tracing::error!("Reset playbook execution failed: {e}");
@@ -361,7 +363,7 @@ impl State {
         r.update(reply_body.with_title("🔄 Reset completed. Running setup playbook..."))
             .await?;
 
-        let setup_output = self.run_ansible_setup(commit).await?;
+        let setup_output = self.run_ansible_setup(&params).await?;
         if !setup_output.status.success() {
             let e = String::from_utf8_lossy(&setup_output.stderr).to_string();
             tracing::error!("Setup playbook execution failed: {e}");
@@ -402,14 +404,13 @@ impl State {
             .context("Failed to execute gate update command")
     }
 
-    // TODO: Remove `commit` ?
     async fn run_ansible_reset(&self, commit: &str) -> Result<std::process::Output> {
         tokio::process::Command::new("ansible-playbook")
             .arg("-i")
             .arg(&self.inventory_file)
             .arg(&self.reset_playbook)
             .arg("--extra-vars")
-            .arg(format!("tycho_commit={}", commit))
+            .arg(format!("tycho_commit={commit}"))
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .output()
@@ -417,13 +418,16 @@ impl State {
             .context("Failed to execute reset playbook")
     }
 
-    async fn run_ansible_setup(&self, commit: &str) -> Result<std::process::Output> {
+    async fn run_ansible_setup(&self, params: &ResetParams) -> Result<std::process::Output> {
         tokio::process::Command::new("ansible-playbook")
             .arg("-i")
             .arg(&self.inventory_file)
             .arg(&self.setup_playbook)
             .arg("--extra-vars")
-            .arg(format!("tycho_commit={}", commit))
+            .arg(format!(
+                "tycho_commit={} tycho_build_profile={} n_nodes={}",
+                params.commit, params.build_profile, params.node_count
+            ))
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .output()
@@ -540,6 +544,52 @@ impl State {
         if let Err(e) = msg.await {
             tracing::error!("Failed to send unfreeze message: {e}");
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResetParams {
+    pub commit: String,
+    pub node_count: usize,
+    pub build_profile: String,
+}
+
+impl ResetParams {
+    const PARAM_NODE_COUNT: &'static str = "nodes";
+    const PARAM_BUILD_PROFILE: &'static str = "profile";
+
+    const DEFAULT_COMMIT: &'static str = "master";
+    const DEFAULT_NODE_COUNT: usize = 13;
+    const DEFAULT_BUILD_PROFILE: &'static str = "release";
+}
+
+impl FromStr for ResetParams {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut commit = None;
+        let mut node_count = Self::DEFAULT_NODE_COUNT;
+        let mut build_profile = Self::DEFAULT_BUILD_PROFILE.to_string();
+
+        for item in s.split(';') {
+            match item.split_once('=') {
+                None => {
+                    anyhow::ensure!(commit.is_none(), "invalid param: {item}");
+                    commit = Some(item.trim().to_owned());
+                }
+                Some((param, value)) => match param.trim() {
+                    Self::PARAM_NODE_COUNT => node_count = value.trim().parse()?,
+                    Self::PARAM_BUILD_PROFILE => value.trim().clone_into(&mut build_profile),
+                    param => anyhow::bail!("unknown param: {param}"),
+                },
+            }
+        }
+
+        Ok(Self {
+            commit: commit.unwrap_or_else(|| Self::DEFAULT_COMMIT.to_owned()),
+            node_count,
+            build_profile,
+        })
     }
 }
 
@@ -795,5 +845,28 @@ impl std::fmt::Display for Reply {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_params_from_str() {
+        let params = "".parse::<ResetParams>().unwrap();
+        assert_eq!(params.commit, "master");
+        assert_eq!(params.node_count, ResetParams::DEFAULT_NODE_COUNT);
+        assert_eq!(params.build_profile, ResetParams::DEFAULT_BUILD_PROFILE);
+
+        let params = "feature/new".parse::<ResetParams>().unwrap();
+        assert_eq!(params.commit, "feature/new");
+        assert_eq!(params.node_count, ResetParams::DEFAULT_NODE_COUNT);
+        assert_eq!(params.build_profile, ResetParams::DEFAULT_BUILD_PROFILE);
+
+        let params = "nodes=10; profile=debug".parse::<ResetParams>().unwrap();
+        assert_eq!(params.commit, "master");
+        assert_eq!(params.node_count, 10);
+        assert_eq!(params.build_profile, "debug");
     }
 }

@@ -30,24 +30,24 @@ pub async fn handle_command(
         Command::Status => state.get_status().await,
         Command::Freeze(expr) => state.freeze(&bot, &msg, &expr),
         Command::Unfreeze => state.unfreeze(&msg),
-        Command::Reset(commit) => {
-            tokio::spawn(async move {
-                let commit = commit.trim();
-                let commit = if commit.is_empty() { "master" } else { commit };
+        Command::Reset(commit) => match commit.parse() {
+            Ok(params) => {
+                tokio::spawn(async move {
+                    if let Err(e) = state.reset_network(bot.clone(), &msg, params).await {
+                        tracing::error!("request failed: {e:?}");
 
-                if let Err(e) = state.reset_network(bot.clone(), &msg, commit).await {
-                    tracing::error!("request failed: {e:?}");
-
-                    let reply = format!("Failed to handle reset:\n```\n{e}\n```");
-                    _ = bot
-                        .send_message(msg.chat.id, reply)
-                        .reply_to(&msg)
-                        .markdown()
-                        .await;
-                }
-            });
-            return Ok(());
-        }
+                        let reply = format!("Failed to handle reset:\n```\n{e}\n```");
+                        _ = bot
+                            .send_message(msg.chat.id, reply)
+                            .reply_to(&msg)
+                            .markdown()
+                            .await;
+                    }
+                });
+                return Ok(());
+            }
+            Err(e) => Err(e),
+        },
         Command::GetCommit => state.get_saved_commit(),
         Command::SetNodeConfig(expr) => state.set_node_config(&msg, &expr),
         Command::GetNodeConfig(expr) => state.get_node_config(&expr),
