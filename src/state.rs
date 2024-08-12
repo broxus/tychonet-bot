@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use everscale_types::models::{AccountState, AccountStatus, StdAddr};
@@ -264,58 +264,21 @@ impl State {
             ResetGuard(&self.reset_running)
         };
 
-        let r = LongReply::begin(bot, msg, "Starting network reset...").await?;
-
-        let commit_info = self.get_commit_info(commit).await?;
-
-        r.update("🔄 Updating gate...").await?;
-
-        let gate_update_output = self.run_gate_update().await?;
-        if !gate_update_output.status.success() {
-            let e = String::from_utf8_lossy(&gate_update_output.stderr).to_string();
-            tracing::error!("Gate update failed: {e}");
-            r.update(format!("Gate update failed:\n```\n{e}\n```"))
-                .await?;
-            r.react(Emoji::Clown).await?;
-            return Ok(());
-        }
-
-        r.update("🔄 Gate updated. Running reset playbook...")
-            .await?;
-
-        let reset_output = self.run_ansible_reset(commit).await?;
-        if !reset_output.status.success() {
-            let e = String::from_utf8_lossy(&reset_output.stderr).to_string();
-            tracing::error!("Reset playbook execution failed: {e}");
-            r.update(format!("Reset playbook execution failed:\n```\n{e}\n```"))
-                .await?;
-            r.react(Emoji::Clown).await?;
-            return Ok(());
-        }
-
-        r.update("🔄 Reset completed. Running setup playbook...")
-            .await?;
-
-        let start = std::time::Instant::now();
-        let setup_output = self.run_ansible_setup(commit).await?;
-        if !setup_output.status.success() {
-            let e = String::from_utf8_lossy(&setup_output.stderr).to_string();
-            tracing::error!("Setup playbook execution failed: {e}");
-            r.update(format!("Setup playbook execution failed:\n```\n{e}\n```"))
-                .await?;
-            r.react(Emoji::Clown).await?;
-            return Ok(());
-        }
-
-        struct SuccessReply<'a> {
+        #[derive(Clone, Copy)]
+        struct ReplyText<'a> {
             commit_info: &'a CommitInfo,
-            took: Duration,
+            started_at: Instant,
         }
 
-        impl std::fmt::Display for SuccessReply<'_> {
+        impl<'a> ReplyText<'a> {
+            fn with_title<T: std::fmt::Display>(self, title: T) -> ReplyTextWithTitle<'a, T> {
+                ReplyTextWithTitle { title, body: self }
+            }
+        }
+
+        impl std::fmt::Display for ReplyText<'_> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                writeln!(f, "✅ Network reset completed successfully!")?;
-                let duration = humantime::format_duration(self.took);
+                let duration = humantime::format_duration(self.started_at.elapsed());
                 writeln!(f, "⏲️ Took: {duration}\n")?;
 
                 let info = self.commit_info;
@@ -342,11 +305,73 @@ impl State {
             }
         }
 
-        let success_reply = SuccessReply {
-            commit_info: &commit_info,
-            took: start.elapsed(),
+        struct ReplyTextWithTitle<'a, T> {
+            title: T,
+            body: ReplyText<'a>,
         }
-            .to_string();
+
+        impl<T: std::fmt::Display> std::fmt::Display for ReplyTextWithTitle<'_, T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                writeln!(f, "{}", self.title)?;
+                std::fmt::Display::fmt(&self.body, f)
+            }
+        }
+
+        let commit_info = self.get_commit_info(commit).await?;
+        let reply_body = ReplyText {
+            commit_info: &commit_info,
+            started_at: Instant::now(),
+        };
+
+        let r = LongReply::begin(
+            bot,
+            msg,
+            reply_body.with_title("🔄 Starting network reset..."),
+        )
+        .await?;
+
+        r.update(reply_body.with_title("🔄 Updating gate..."))
+            .await?;
+
+        let gate_update_output = self.run_gate_update().await?;
+        if !gate_update_output.status.success() {
+            let e = String::from_utf8_lossy(&gate_update_output.stderr).to_string();
+            tracing::error!("Gate update failed: {e}");
+            r.update(reply_body.with_title(format!("🟥 Gate update failed:\n```\n{e}\n```\n")))
+                .await?;
+            r.react(Emoji::Clown).await?;
+            return Ok(());
+        }
+
+        r.update(reply_body.with_title("🔄 Gate updated. Running reset playbook..."))
+            .await?;
+
+        let reset_output = self.run_ansible_reset(commit).await?;
+        if !reset_output.status.success() {
+            let e = String::from_utf8_lossy(&reset_output.stderr).to_string();
+            tracing::error!("Reset playbook execution failed: {e}");
+            r.update(reply_body.with_title(format!(
+                "🟥 Reset playbook execution failed:\n```\n{e}\n```\n"
+            )))
+            .await?;
+            r.react(Emoji::Clown).await?;
+            return Ok(());
+        }
+
+        r.update(reply_body.with_title("🔄 Reset completed. Running setup playbook..."))
+            .await?;
+
+        let setup_output = self.run_ansible_setup(commit).await?;
+        if !setup_output.status.success() {
+            let e = String::from_utf8_lossy(&setup_output.stderr).to_string();
+            tracing::error!("Setup playbook execution failed: {e}");
+            r.update(reply_body.with_title(format!(
+                "🟥 Setup playbook execution failed:\n```\n{e}\n```\n"
+            )))
+            .await?;
+            r.react(Emoji::Clown).await?;
+            return Ok(());
+        }
 
         let link_preview = LinkPreviewOptions {
             url: commit_info.html_url.clone(),
@@ -354,11 +379,11 @@ impl State {
 
         {
             let mut state_file = self.state_file.lock().unwrap();
-            state_file.latest_data.last_commit_info = Some(commit_info);
+            state_file.latest_data.last_commit_info = Some(commit_info.clone());
             state_file.save()?;
         }
 
-        r.update(success_reply)
+        r.update(reply_body.with_title("✅ Network reset completed successfully!"))
             .link_preview_options(Some(link_preview))
             .await?;
 
@@ -595,10 +620,10 @@ struct LongReply {
 }
 
 impl LongReply {
-    async fn begin(bot: Bot, msg: &Message, text: impl Into<String>) -> Result<Self> {
+    async fn begin(bot: Bot, msg: &Message, text: impl std::fmt::Display) -> Result<Self> {
         let chat_id = msg.chat.id;
         let reply = bot
-            .send_message(chat_id, text)
+            .send_message(chat_id, text.to_string())
             .reply_to(msg)
             .markdown()
             .await?;
@@ -613,10 +638,14 @@ impl LongReply {
 
     fn update(
         &self,
-        text: impl Into<String>,
+        text: impl std::fmt::Display,
     ) -> JsonRequest<WithLinkPreview<teloxide::payloads::EditMessageText>> {
         let req = WithLinkPreview {
-            inner: teloxide::payloads::EditMessageText::new(self.chat_id, self.reply_msg_id, text),
+            inner: teloxide::payloads::EditMessageText::new(
+                self.chat_id,
+                self.reply_msg_id,
+                text.to_string(),
+            ),
             link_preview_options: None,
         };
         JsonRequest::new(self.bot.clone(), req).markdown()
