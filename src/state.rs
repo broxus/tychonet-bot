@@ -32,6 +32,7 @@ pub struct State {
     jrpc_client: JrpcClient,
     github_client: GithubClient,
     inventory_file: String,
+    ansible_config_file: String,
     node_config_file: String,
     logger_config_file: String,
     zerostate_file: String,
@@ -71,6 +72,7 @@ impl State {
             jrpc_client: JrpcClient::new(&settings.rpc_url)?,
             github_client,
             inventory_file: settings.inventory_file.clone(),
+            ansible_config_file: settings.ansible_config_file.clone(),
             node_config_file: settings.node_config_file.clone(),
             logger_config_file: settings.logger_config_file.clone(),
             zerostate_file: settings.zerostate_file.clone(),
@@ -432,6 +434,7 @@ impl State {
             .arg(format!("tycho_commit={commit}"))
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
+            .env(ANSIBLE_CONFIG_ENV, &self.ansible_config_file)
             .output()
             .await
             .context("Failed to execute reset playbook")
@@ -449,6 +452,7 @@ impl State {
             ))
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
+            .env(ANSIBLE_CONFIG_ENV, &self.ansible_config_file)
             .output()
             .await
             .context("Failed to execute setup playbook")
@@ -565,6 +569,8 @@ impl State {
         }
     }
 }
+
+const ANSIBLE_CONFIG_ENV: &str = "ANSIBLE_CONFIG";
 
 #[derive(Debug, Clone)]
 pub struct ResetParams {
