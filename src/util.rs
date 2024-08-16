@@ -1,4 +1,5 @@
 use serde::Serialize;
+use teloxide::types::ReplyParameters;
 
 pub fn now_sec() -> u64 {
     std::time::SystemTime::now()
@@ -51,7 +52,10 @@ pub trait SendMessageExt {
 
 impl SendMessageExt for teloxide::requests::JsonRequest<teloxide::payloads::SendMessage> {
     fn reply_to(mut self, message: &teloxide::prelude::Message) -> Self {
-        self.reply_to_message_id = Some(message.id);
+        self.reply_parameters = Some(ReplyParameters {
+            message_id: message.id,
+            ..Default::default()
+        });
         self.message_thread_id = message.thread_id;
         self
     }
@@ -77,7 +81,10 @@ impl SendMessageExt for teloxide::requests::JsonRequest<teloxide::payloads::Edit
 
 impl SendMessageExt for teloxide::requests::JsonRequest<teloxide::payloads::SendDocument> {
     fn reply_to(mut self, message: &teloxide::prelude::Message) -> Self {
-        self.reply_to_message_id = Some(message.id);
+        self.reply_parameters = Some(ReplyParameters {
+            message_id: message.id,
+            ..Default::default()
+        });
         self.message_thread_id = message.thread_id;
         self
     }
@@ -119,7 +126,10 @@ impl SendMessageExt
     for teloxide::requests::JsonRequest<WithLinkPreview<teloxide::payloads::SendMessage>>
 {
     fn reply_to(mut self, message: &teloxide::prelude::Message) -> Self {
-        self.inner.reply_to_message_id = Some(message.id);
+        self.inner.reply_parameters = Some(ReplyParameters {
+            message_id: message.id,
+            ..Default::default()
+        });
         self.inner.message_thread_id = message.thread_id;
         self
     }
@@ -189,5 +199,39 @@ pub mod serde_string {
         use serde::de::{Deserialize, Error};
 
         String::deserialize(deserializer).and_then(|s| T::from_str(&s).map_err(D::Error::custom))
+    }
+}
+
+#[allow(unused)]
+pub mod serde_option_string {
+    use std::str::FromStr;
+
+    use serde::Serialize;
+
+    use super::*;
+
+    pub fn serialize<S, T>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+        T: std::fmt::Display,
+    {
+        #[derive(Serialize)]
+        struct Helper<'a, T: std::fmt::Display>(#[serde(with = "serde_string")] &'a T);
+
+        value.as_ref().map(Helper).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+        T: FromStr,
+        T::Err: std::fmt::Display,
+    {
+        use serde::de::{Deserialize, Error};
+
+        Option::<String>::deserialize(deserializer).and_then(|s| {
+            s.map(|s| T::from_str(&s).map_err(Error::custom))
+                .transpose()
+        })
     }
 }

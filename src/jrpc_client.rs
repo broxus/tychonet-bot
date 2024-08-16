@@ -4,11 +4,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use everscale_types::boc::{Boc, BocRepr};
 use everscale_types::cell::{Cell, HashBytes};
-use everscale_types::models::{Account, BlockchainConfig, StdAddr};
+use everscale_types::models::{Account, BlockchainConfig, StdAddr, Transaction};
 use reqwest::{IntoUrl, Url};
 use serde::{Deserialize, Serialize};
 
-use crate::util::serde_string;
+use crate::util::{serde_option_string, serde_string};
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -57,6 +57,65 @@ impl JrpcClient {
                 params: &Params { address },
             })
             .await
+    }
+
+    #[allow(unused)]
+    pub async fn get_dst_transaction(
+        &self,
+        message_hash: &HashBytes,
+    ) -> Result<Option<Box<Transaction>>> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Params<'a> {
+            message_hash: &'a HashBytes,
+        }
+
+        let Some(tx) = self
+            .inner
+            .post::<_, Option<String>>(&JrpcRequest {
+                method: "getDstTransaction",
+                params: &Params { message_hash },
+            })
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(BocRepr::decode_base64(&tx)?))
+    }
+
+    #[allow(unused)]
+    pub async fn get_transactions(
+        &self,
+        address: &StdAddr,
+        last_lt: Option<u64>,
+        limit: u8,
+    ) -> Result<Vec<Box<Transaction>>> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Params<'a> {
+            pub account: &'a StdAddr,
+            #[serde(with = "serde_option_string")]
+            pub last_transaction_lt: Option<u64>,
+            pub limit: u8,
+        }
+
+        let txs = self
+            .inner
+            .post::<_, Vec<String>>(&JrpcRequest {
+                method: "getTransactionsList",
+                params: &Params {
+                    account: address,
+                    last_transaction_lt: last_lt,
+                    limit,
+                },
+            })
+            .await?;
+
+        txs.into_iter()
+            .map(|tx| BocRepr::decode_base64(&tx))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub async fn get_config(&self) -> Result<LatestBlockchainConfig> {
@@ -210,7 +269,7 @@ where
     where
         D: serde::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
+        #[derive(Debug, Deserialize)]
         #[serde(rename_all = "lowercase")]
         enum Field {
             Result,
@@ -240,28 +299,30 @@ where
             where
                 A: serde::de::MapAccess<'de>,
             {
+                let mut result = None::<ResponseData<T>>;
+
                 while let Some(key) = map.next_key()? {
                     match key {
-                        Field::Result => {
-                            return map.next_value().map(ResponseData::Result);
+                        Field::Result if result.is_none() => {
+                            result = Some(map.next_value().map(ResponseData::Result)?);
                         }
-                        Field::Error => {
-                            return map.next_value().map(ResponseData::Error);
+                        Field::Error if result.is_none() => {
+                            result = Some(map.next_value().map(ResponseData::Error)?);
                         }
                         Field::Other => {
                             map.next_value::<&serde_json::value::RawValue>()?;
-                            continue;
                         }
+                        Field::Result => return Err(serde::de::Error::duplicate_field("result")),
+                        Field::Error => return Err(serde::de::Error::duplicate_field("error")),
                     }
                 }
 
-                Err(serde::de::Error::missing_field("result or error"))
+                result.ok_or_else(|| serde::de::Error::missing_field("result or error"))
             }
         }
 
         Ok(match de.deserialize_map(ResponseVisitor(PhantomData))? {
             ResponseData::Result(result) => JrpcResponse::Success(result),
-            // ResponseData::Error(error) => JrpcResponse::Err(error),
             ResponseData::Error(error) => JrpcResponse::Err(error),
         })
     }
@@ -278,5 +339,8 @@ mod tests {
 
         let json = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"unknown method\"}}";
         serde_json::from_str::<JrpcResponse<()>>(json).unwrap();
+
+        let json = "{\"jsonrpc\":\"2.0\",\"result\":42,\"id\":1}";
+        serde_json::from_str::<JrpcResponse<i32>>(json).unwrap();
     }
 }

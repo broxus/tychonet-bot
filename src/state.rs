@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use teloxide::prelude::*;
 use teloxide::requests::{JsonRequest, MultipartRequest};
-use teloxide::types::{ChatId, MessageId};
+use teloxide::types::{ChatId, MessageId, ReplyParameters, ThreadId};
 use tokio::task::AbortHandle;
 
 use crate::commands::{Currency, DecimalTokens};
@@ -562,7 +562,10 @@ impl State {
         };
 
         let mut msg = bot.send_message(frozen.chat_id, Reply::Unfreeze.to_string());
-        msg.reply_to_message_id = Some(frozen.message_id);
+        msg.reply_parameters = Some(ReplyParameters {
+            message_id: frozen.message_id,
+            ..Default::default()
+        });
         msg.message_thread_id = frozen.message_thread_id;
         if let Err(e) = msg.await {
             tracing::error!("Failed to send unfreeze message: {e}");
@@ -599,6 +602,11 @@ impl FromStr for ResetParams {
         for item in s.split(';') {
             match item.split_once('=') {
                 None => {
+                    let item = item.trim();
+                    if item.is_empty() {
+                        continue;
+                    }
+
                     anyhow::ensure!(commit.is_none(), "invalid param: {item}");
                     commit = Some(item.trim().to_owned());
                 }
@@ -668,7 +676,7 @@ pub struct ResetFrozen {
 
     pub chat_id: ChatId,
     pub message_id: MessageId,
-    pub message_thread_id: Option<i32>,
+    pub message_thread_id: Option<ThreadId>,
 }
 
 fn parse_config_value_path(s: &str) -> Result<Vec<String>> {
@@ -692,7 +700,7 @@ struct LongReply {
     chat_id: ChatId,
     original_msg_id: MessageId,
     reply_msg_id: MessageId,
-    reply_thread_id: Option<i32>,
+    reply_thread_id: Option<ThreadId>,
 }
 
 impl LongReply {
@@ -735,7 +743,10 @@ impl LongReply {
     ) -> MultipartRequest<teloxide::payloads::SendDocument> {
         let document = teloxide::types::InputFile::memory(error).file_name(name);
         let mut req = self.bot.send_document(self.chat_id, document);
-        req.reply_to_message_id = Some(self.reply_msg_id);
+        req.reply_parameters = Some(ReplyParameters {
+            message_id: self.reply_msg_id,
+            ..Default::default()
+        });
         req.message_thread_id = self.reply_thread_id;
         req
     }
