@@ -49,6 +49,8 @@ pub async fn handle_command(
             Err(e) => Err(e),
         },
         Command::GetCommit => state.get_saved_commit(),
+        Command::SetResetType(expr) => state.set_reset_type(&msg, &expr),
+        Command::GetResetType => state.get_reset_type(),
         Command::SetNodeConfig(expr) => state.set_node_config(&msg, &expr),
         Command::GetNodeConfig(expr) => state.get_node_config(&expr),
         Command::SetLoggerConfig(expr) => state.set_logger_config(&msg, &expr),

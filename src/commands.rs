@@ -23,6 +23,10 @@ pub enum Command {
     Reset(String),
     #[command(description = "retrieve the current deployed commit.")]
     GetCommit,
+    #[command(description = "use one of reset types: `full` or `restart`")]
+    SetResetType(String),
+    #[command(description = "get current reset type.")]
+    GetResetType,
     #[command(description = "set node config.")]
     SetNodeConfig(String),
     #[command(description = "get node config.")]

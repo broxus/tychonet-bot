@@ -214,6 +214,25 @@ impl State {
             .context("no commit info saved")
     }
 
+    pub fn get_reset_type(&self) -> Result<Reply> {
+        let state_file = self.state_file.lock().unwrap();
+        Ok(Reply::ResetType(state_file.latest_data.reset_type))
+    }
+
+    pub fn set_reset_type(&self, msg: &Message, expr: &str) -> Result<Reply> {
+        if !self.check_auth(msg) {
+            return Ok(Reply::AccessDenied);
+        }
+
+        let reset_type = expr.parse()?;
+
+        let mut state_file = self.state_file.lock().unwrap();
+        state_file.latest_data.reset_type = reset_type;
+        state_file.save()?;
+
+        Ok(Reply::ResetType(reset_type))
+    }
+
     pub async fn reset_network(&self, bot: Bot, msg: &Message, params: ResetParams) -> Result<()> {
         struct ResetGuard<'a>(&'a AtomicBool);
 
@@ -230,9 +249,14 @@ impl State {
             return Ok(());
         }
 
+        let reset_type;
         'frozen: {
             let frozen = {
                 let mut state_file = self.state_file.lock().unwrap();
+                reset_type = params
+                    .reset_type
+                    .unwrap_or(state_file.latest_data.reset_type);
+
                 let Some(frozen) = &state_file.latest_data.reset_frozen else {
                     break 'frozen;
                 };
@@ -271,6 +295,7 @@ impl State {
         #[derive(Clone, Copy)]
         struct ReplyText<'a> {
             commit_info: &'a CommitInfo,
+            reset_type: ResetType,
             started_at: Instant,
         }
 
@@ -284,7 +309,13 @@ impl State {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let elapsed_secs = self.started_at.elapsed().as_secs();
                 let duration = humantime::format_duration(Duration::from_secs(elapsed_secs));
-                writeln!(f, "⏰ Elapsed: {duration}\n")?;
+                writeln!(f, "⏰ Elapsed: {duration}")?;
+                writeln!(
+                    f,
+                    "{} Reset type: *{}*\n",
+                    self.reset_type.as_emoji(),
+                    self.reset_type
+                )?;
 
                 let info = self.commit_info;
 
@@ -348,6 +379,7 @@ impl State {
         let commit_info = self.get_commit_info(&params.commit).await?;
         let reply_body = ReplyText {
             commit_info: &commit_info,
+            reset_type,
             started_at: Instant::now(),
         };
 
@@ -373,7 +405,7 @@ impl State {
         r.update(reply_body.with_title("🔄 Gate updated. Running reset playbook..."))
             .await?;
 
-        let reset_output = self.run_ansible_reset(&params.commit).await?;
+        let reset_output = self.run_ansible_reset(&params.commit, reset_type).await?;
         if !reset_output.status.success() {
             let e = String::from_utf8_lossy(&reset_output.stdout).to_string();
             tracing::error!("Reset playbook execution failed: {e}");
@@ -425,13 +457,19 @@ impl State {
             .context("Failed to execute gate update command")
     }
 
-    async fn run_ansible_reset(&self, commit: &str) -> Result<std::process::Output> {
+    async fn run_ansible_reset(
+        &self,
+        commit: &str,
+        reset_type: ResetType,
+    ) -> Result<std::process::Output> {
+        let restart_only = matches!(reset_type, ResetType::Restart);
+
         tokio::process::Command::new("ansible-playbook")
             .arg("-i")
             .arg(&self.inventory_file)
             .arg(&self.reset_playbook)
             .arg("--extra-vars")
-            .arg(format!("tycho_commit={commit}"))
+            .arg(format!("tycho_commit={commit} restart_only={restart_only}"))
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .env(ANSIBLE_CONFIG_ENV, &self.ansible_config_file)
@@ -441,14 +479,28 @@ impl State {
     }
 
     async fn run_ansible_setup(&self, params: &ResetParams) -> Result<std::process::Output> {
+        let mempool_start_round = params
+            .mempool_start_round
+            .map(|r| format!(" mempool_start_round={r}"))
+            .unwrap_or_default();
+
+        let from_mc_block_seqno = params
+            .from_mc_block_seqno
+            .map(|s| format!(" from_mc_block_seqno={s}"))
+            .unwrap_or_default();
+
         tokio::process::Command::new("ansible-playbook")
             .arg("-i")
             .arg(&self.inventory_file)
             .arg(&self.setup_playbook)
             .arg("--extra-vars")
             .arg(format!(
-                "tycho_commit={} tycho_build_profile={} n_nodes={}",
-                params.commit, params.build_profile, params.node_count
+                "tycho_commit={} tycho_build_profile={} n_nodes={}{}{}",
+                params.commit,
+                params.build_profile,
+                params.node_count,
+                mempool_start_round,
+                from_mc_block_seqno
             ))
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -580,11 +632,17 @@ pub struct ResetParams {
     pub commit: String,
     pub node_count: usize,
     pub build_profile: String,
+    pub reset_type: Option<ResetType>,
+    pub mempool_start_round: Option<u64>,
+    pub from_mc_block_seqno: Option<u32>,
 }
 
 impl ResetParams {
     const PARAM_NODE_COUNT: &'static str = "nodes";
     const PARAM_BUILD_PROFILE: &'static str = "profile";
+    const PARAM_RESET_TYPE: &'static str = "type";
+    const PARAM_MEMPOOL_START_ROUND: &'static str = "mempool_start_round";
+    const PARAM_FROM_MC_BLOCK_SEQNO: &'static str = "from_mc_block_seqno";
 
     const DEFAULT_COMMIT: &'static str = "master";
     const DEFAULT_NODE_COUNT: usize = 13;
@@ -598,6 +656,9 @@ impl FromStr for ResetParams {
         let mut commit = None;
         let mut node_count = Self::DEFAULT_NODE_COUNT;
         let mut build_profile = Self::DEFAULT_BUILD_PROFILE.to_string();
+        let mut reset_type = None::<ResetType>;
+        let mut mempool_start_round = None::<u64>;
+        let mut from_mc_block_seqno = None::<u32>;
 
         for item in s.split(';') {
             match item.split_once('=') {
@@ -613,6 +674,13 @@ impl FromStr for ResetParams {
                 Some((param, value)) => match param.trim() {
                     Self::PARAM_NODE_COUNT => node_count = value.trim().parse()?,
                     Self::PARAM_BUILD_PROFILE => value.trim().clone_into(&mut build_profile),
+                    Self::PARAM_RESET_TYPE => reset_type = Some(value.trim().parse()?),
+                    Self::PARAM_MEMPOOL_START_ROUND => {
+                        mempool_start_round = Some(value.trim().parse()?);
+                    }
+                    Self::PARAM_FROM_MC_BLOCK_SEQNO => {
+                        from_mc_block_seqno = Some(value.trim().parse()?);
+                    }
                     param => anyhow::bail!("unknown param: {param}"),
                 },
             }
@@ -622,6 +690,9 @@ impl FromStr for ResetParams {
             commit: commit.unwrap_or_else(|| Self::DEFAULT_COMMIT.to_owned()),
             node_count,
             build_profile,
+            reset_type,
+            mempool_start_round,
+            from_mc_block_seqno,
         })
     }
 }
@@ -659,6 +730,8 @@ impl StateFile {
 struct StateFileData {
     last_commit_info: Option<CommitInfo>,
     reset_frozen: Option<ResetFrozen>,
+    #[serde(default)]
+    reset_type: ResetType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -693,6 +766,46 @@ fn parse_config_value_path(s: &str) -> Result<Vec<String>> {
             Ok(item.to_owned())
         })
         .collect()
+}
+
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum ResetType {
+    #[default]
+    Full,
+    Restart,
+}
+
+impl ResetType {
+    const FULL: &'static str = "full";
+    const RESTART: &'static str = "restart";
+
+    fn as_emoji(&self) -> &'static str {
+        match self {
+            Self::Full => "💣",
+            Self::Restart => "🔄",
+        }
+    }
+}
+
+impl std::fmt::Display for ResetType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Full => Self::FULL,
+            Self::Restart => Self::RESTART,
+        })
+    }
+}
+
+impl FromStr for ResetType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            Self::FULL => Ok(Self::Full),
+            Self::RESTART => Ok(Self::Restart),
+            _ => anyhow::bail!("unknown reset type"),
+        }
+    }
 }
 
 struct LongReply {
@@ -787,6 +900,7 @@ pub enum Reply {
     ZerostateParam(String),
     AccessDenied,
     ResetFrozen(ResetFrozen),
+    ResetType(ResetType),
 }
 
 impl Reply {
@@ -893,6 +1007,9 @@ impl std::fmt::Display for Reply {
                 }
 
                 Ok(())
+            }
+            Self::ResetType(reset_type) => {
+                write!(f, "Reset type: *{reset_type}*")
             }
         }
     }
