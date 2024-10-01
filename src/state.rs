@@ -16,7 +16,7 @@ use teloxide::types::{ChatId, MessageId, ReplyParameters, ThreadId};
 use tokio::task::AbortHandle;
 
 use crate::commands::{Currency, DecimalTokens};
-use crate::config::{Config, ConfigDiff};
+use crate::config::{parse_path, Config, ConfigDiff};
 use crate::github_client::GithubClient;
 use crate::jrpc_client;
 use crate::jrpc_client::{JrpcClient, StateTimings};
@@ -520,7 +520,7 @@ impl State {
         let expr = expr.trim();
         match expr.strip_prefix("delete") {
             Some(path) => {
-                let path = parse_config_value_path(path)?;
+                let path = parse_path(path)?;
                 anyhow::ensure!(!path.is_empty(), "cannot delete the config root");
                 config.remove(&path)?;
             }
@@ -529,7 +529,7 @@ impl State {
                     .split_once('=')
                     .context("expected an expression: (.path)+ = json")?;
 
-                let path = parse_config_value_path(path)?;
+                let path = parse_path(path)?;
                 let value = serde_json::from_str(value)?;
                 config.set(&path, value)?;
             }
@@ -540,7 +540,7 @@ impl State {
 
     fn get_config_impl(&self, path: &str, expr: &str) -> Result<String> {
         let config = Config::from_file(path)?;
-        let path = parse_config_value_path(expr)?;
+        let path = parse_path(expr)?;
         let value = serde_json::to_string_pretty(config.get(&path)?)?;
         Ok(value)
     }
@@ -677,22 +677,6 @@ pub struct ResetFrozen {
     pub chat_id: ChatId,
     pub message_id: MessageId,
     pub message_thread_id: Option<ThreadId>,
-}
-
-fn parse_config_value_path(s: &str) -> Result<Vec<String>> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let s = s.strip_prefix('.').unwrap_or(s);
-    s.split('.')
-        .map(|item| {
-            let item = item.trim();
-            anyhow::ensure!(!item.is_empty(), "empty path items are not allowed");
-            Ok(item.to_owned())
-        })
-        .collect()
 }
 
 struct LongReply {

@@ -25,3 +25,6 @@ everscale-types = { git = "https://github.com/broxus/everscale-types.git", defau
     "base64",
     "serde",
 ] }
+
+[dev-dependencies]
+tempfile = "3.13.0"
