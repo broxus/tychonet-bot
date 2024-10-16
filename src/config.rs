@@ -21,6 +21,23 @@ impl Config {
         })
     }
 
+    pub fn from_value(
+        path: &str,
+        value: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Self> {
+        let initial_value =
+            serde_json::to_string_pretty(&value).context("failed to serialize config")?;
+        Ok(Self {
+            path: PathBuf::from(path),
+            value: serde_json::Value::Object(value),
+            initial_value,
+        })
+    }
+
+    pub fn as_object(&self) -> Result<serde_json::Map<String, serde_json::Value>> {
+        self.value.as_object().cloned().context("expected object")
+    }
+
     pub fn save(self) -> Result<ConfigDiff> {
         let new_value =
             serde_json::to_string_pretty(&self.value).context("Failed to serialize config")?;

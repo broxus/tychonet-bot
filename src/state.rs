@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -214,6 +214,138 @@ impl State {
             .context("no commit info saved")
     }
 
+    pub fn set_workspace(&self, msg: &Message, expr: &str) -> Result<Reply> {
+        use std::collections::hash_map;
+
+        if !self.check_auth(msg) {
+            return Ok(Reply::AccessDenied);
+        }
+
+        let SetWorkspaceParams {
+            workspace,
+            copy_from,
+        } = expr.parse()?;
+
+        let mut state_file = self.state_file.lock().unwrap();
+
+        let prev_workspace = match &copy_from {
+            Some(workspace) if workspace != DEFAULT_WORKSPACE => state_file
+                .latest_data
+                .workspaces
+                .get_mut(workspace)
+                .with_context(|| format!("workspace not found {workspace}"))?,
+            _ => state_file
+                .latest_data
+                .workspaces
+                .entry(DEFAULT_WORKSPACE.to_owned())
+                .or_default(),
+        };
+
+        let compute_prev_source = |object: &Option<JsonObject>| {
+            if object.is_none() {
+                ConfigSource::FromFile
+            } else if copy_from.is_some() {
+                ConfigSource::Copied
+            } else {
+                ConfigSource::Unchanged
+            }
+        };
+        let node_source = compute_prev_source(&prev_workspace.node);
+        let logger_source = compute_prev_source(&prev_workspace.logger);
+        let zerostate_source = compute_prev_source(&prev_workspace.zerostate);
+
+        prev_workspace.preload(
+            &self.node_config_file,
+            &self.logger_config_file,
+            &self.zerostate_file,
+        )?;
+        let prev_workspace = prev_workspace.clone();
+
+        let is_new;
+        match state_file.latest_data.workspaces.entry(workspace.clone()) {
+            hash_map::Entry::Vacant(entry) => {
+                is_new = true;
+                entry.insert(prev_workspace.clone());
+            }
+            hash_map::Entry::Occupied(mut entry) => {
+                is_new = false;
+                if copy_from.is_some() {
+                    entry.insert(prev_workspace);
+                }
+            }
+        }
+
+        state_file.latest_data.current_workspace = Some(workspace);
+        state_file.save()?;
+
+        Ok(Reply::WorkspaceChanged {
+            is_new,
+            node_source,
+            logger_source,
+            zerostate_source,
+            copy_from,
+        })
+    }
+
+    pub fn get_workspace(&self, expr: &str) -> Result<Reply> {
+        let GetWorkspacesParams { all } = expr.parse()?;
+
+        let state_file = self.state_file.lock().unwrap();
+
+        let current = state_file
+            .latest_data
+            .current_workspace
+            .clone()
+            .unwrap_or_else(|| DEFAULT_WORKSPACE.to_owned());
+
+        if !all {
+            return Ok(Reply::Workspace(current));
+        }
+
+        let mut workspaces = Vec::new();
+        if !state_file.latest_data.workspaces.contains_key(&current) {
+            workspaces.push(current.clone());
+        }
+        workspaces.extend(state_file.latest_data.workspaces.keys().cloned());
+        workspaces.sort_unstable();
+
+        Ok(Reply::Workspaces {
+            current,
+            workspaces,
+        })
+    }
+
+    pub fn delete_workspace(&self, msg: &Message, expr: &str) -> Result<Reply> {
+        if !self.check_auth(msg) {
+            return Ok(Reply::AccessDenied);
+        }
+
+        let workspace_name = expr.trim();
+        if workspace_name == DEFAULT_WORKSPACE {
+            anyhow::bail!("cannot remove the default workspace");
+        }
+
+        let mut state_file = self.state_file.lock().unwrap();
+
+        if matches!(
+            &state_file.latest_data.current_workspace,
+            Some(current) if current == workspace_name
+        ) {
+            state_file.latest_data.current_workspace = None;
+        }
+
+        if state_file
+            .latest_data
+            .workspaces
+            .remove(workspace_name)
+            .is_none()
+        {
+            anyhow::bail!("workspace does not exist: `{workspace_name}`");
+        }
+
+        Ok(Reply::WorkspaceRemoved)
+    }
+
     pub fn get_reset_type(&self) -> Result<Reply> {
         let state_file = self.state_file.lock().unwrap();
         Ok(Reply::ResetType(state_file.latest_data.reset_type))
@@ -258,6 +390,12 @@ impl State {
                     .unwrap_or(state_file.latest_data.reset_type);
 
                 let Some(frozen) = &state_file.latest_data.reset_frozen else {
+                    state_file.latest_data.apply_workspace_configs(
+                        &self.node_config_file,
+                        &self.logger_config_file,
+                        &self.zerostate_file,
+                    )?;
+                    state_file.save()?;
                     break 'frozen;
                 };
 
@@ -268,6 +406,11 @@ impl State {
 
                     // Unfreeze on timestamp reached
                     state_file.latest_data.reset_frozen = None;
+                    state_file.latest_data.apply_workspace_configs(
+                        &self.node_config_file,
+                        &self.logger_config_file,
+                        &self.zerostate_file,
+                    )?;
                     state_file.save()?;
                     break 'frozen;
                 }
@@ -514,12 +657,12 @@ impl State {
         if !self.check_auth(msg) {
             return Ok(Reply::AccessDenied);
         }
-        self.set_config_impl(&self.node_config_file, expr)
+        self.set_config_impl(ConfigType::Node, &self.node_config_file, expr)
             .map(Reply::NodeConfigUpdated)
     }
 
     pub fn get_node_config(&self, expr: &str) -> Result<Reply> {
-        self.get_config_impl(&self.node_config_file, expr)
+        self.get_config_impl(ConfigType::Node, &self.node_config_file, expr)
             .map(Reply::NodeConfigParam)
     }
 
@@ -527,12 +670,12 @@ impl State {
         if !self.check_auth(msg) {
             return Ok(Reply::AccessDenied);
         }
-        self.set_config_impl(&self.logger_config_file, expr)
+        self.set_config_impl(ConfigType::Logger, &self.logger_config_file, expr)
             .map(Reply::LoggerConfigUpdated)
     }
 
     pub fn get_logger_config(&self, expr: &str) -> Result<Reply> {
-        self.get_config_impl(&self.logger_config_file, expr)
+        self.get_config_impl(ConfigType::Logger, &self.logger_config_file, expr)
             .map(Reply::LoggerConfigParam)
     }
 
@@ -540,12 +683,12 @@ impl State {
         if !self.check_auth(msg) {
             return Ok(Reply::AccessDenied);
         }
-        self.set_config_impl(&self.zerostate_file, expr)
+        self.set_config_impl(ConfigType::Zerostate, &self.zerostate_file, expr)
             .map(Reply::ZerostateUpdated)
     }
 
     pub fn get_zerostate(&self, expr: &str) -> Result<Reply> {
-        self.get_config_impl(&self.zerostate_file, expr)
+        self.get_config_impl(ConfigType::Zerostate, &self.zerostate_file, expr)
             .map(Reply::ZerostateParam)
     }
 
@@ -566,8 +709,14 @@ impl State {
         })
     }
 
-    fn set_config_impl(&self, path: &str, expr: &str) -> Result<ConfigDiff> {
-        let mut config = Config::from_file(path)?;
+    fn set_config_impl(&self, ty: ConfigType, path: &str, expr: &str) -> Result<ConfigDiff> {
+        let mut state_file = self.state_file.lock().unwrap();
+
+        let object = state_file.latest_data.get_config_object(ty);
+        let mut config = match object {
+            Some(object) => Config::from_value(path, object.clone())?,
+            None => Config::from_file(path)?,
+        };
 
         let expr = expr.trim();
         match expr.strip_prefix("delete") {
@@ -587,13 +736,30 @@ impl State {
             }
         }
 
-        config.save()
+        *object = Some(config.as_object()?);
+        let diff = config.save()?;
+        state_file.save()?;
+
+        Ok(diff)
     }
 
-    fn get_config_impl(&self, path: &str, expr: &str) -> Result<String> {
-        let config = Config::from_file(path)?;
-        let path = parse_config_value_path(expr)?;
-        let value = serde_json::to_string_pretty(config.get(&path)?)?;
+    fn get_config_impl(&self, ty: ConfigType, path: &str, expr: &str) -> Result<String> {
+        let field_path = parse_config_value_path(expr)?;
+
+        let mut state_file = self.state_file.lock().unwrap();
+
+        let object = state_file.latest_data.get_config_object(ty);
+        let config = match object {
+            Some(object) => Config::from_value(path, object.clone())?,
+            None => {
+                let config = Config::from_file(path)?;
+                *object = Some(config.as_object()?);
+                state_file.save()?;
+                config
+            }
+        };
+
+        let value = serde_json::to_string_pretty(config.get(&field_path)?)?;
         Ok(value)
     }
 
@@ -623,6 +789,20 @@ impl State {
             tracing::error!("Failed to send unfreeze message: {e}");
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ConfigType {
+    Logger,
+    Node,
+    Zerostate,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ConfigSource {
+    Unchanged,
+    Copied,
+    FromFile,
 }
 
 const ANSIBLE_CONFIG_ENV: &str = "ANSIBLE_CONFIG";
@@ -732,7 +912,155 @@ struct StateFileData {
     reset_frozen: Option<ResetFrozen>,
     #[serde(default)]
     reset_type: ResetType,
+    #[serde(default)]
+    current_workspace: Option<String>,
+    #[serde(default)]
+    workspaces: HashMap<String, Workspace>,
 }
+
+impl StateFileData {
+    fn apply_workspace_configs(
+        &mut self,
+        node_path: &str,
+        logger_path: &str,
+        zerostate_path: &str,
+    ) -> Result<()> {
+        for (ty, path) in [
+            (ConfigType::Node, node_path),
+            (ConfigType::Logger, logger_path),
+            (ConfigType::Zerostate, zerostate_path),
+        ] {
+            let object = self.get_config_object(ty);
+            match object {
+                Some(object) => {
+                    let config = Config::from_value(path, object.clone())?;
+                    config.save()?;
+                }
+                None => {
+                    let config = Config::from_file(path)?;
+                    *object = Some(config.as_object()?);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn get_config_object(&mut self, ty: ConfigType) -> &mut Option<JsonObject> {
+        self.workspaces
+            .entry(self.current_workspace_name())
+            .or_default()
+            .get_config_object(ty)
+    }
+
+    fn current_workspace_name(&self) -> String {
+        self.current_workspace
+            .as_deref()
+            .unwrap_or(DEFAULT_WORKSPACE)
+            .to_owned()
+    }
+}
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+struct Workspace {
+    #[serde(default)]
+    node: Option<JsonObject>,
+    #[serde(default)]
+    logger: Option<JsonObject>,
+    #[serde(default)]
+    zerostate: Option<JsonObject>,
+}
+
+impl Workspace {
+    fn preload(&mut self, node_path: &str, logger_path: &str, zerostate_path: &str) -> Result<()> {
+        for (ty, path) in [
+            (ConfigType::Node, node_path),
+            (ConfigType::Logger, logger_path),
+            (ConfigType::Zerostate, zerostate_path),
+        ] {
+            let object = self.get_config_object(ty);
+            if object.is_none() {
+                let config = Config::from_file(path)?;
+                *object = Some(config.as_object()?);
+            }
+        }
+        Ok(())
+    }
+
+    fn get_config_object(&mut self, ty: ConfigType) -> &mut Option<JsonObject> {
+        match ty {
+            ConfigType::Node => &mut self.node,
+            ConfigType::Logger => &mut self.logger,
+            ConfigType::Zerostate => &mut self.zerostate,
+        }
+    }
+}
+
+type JsonObject = serde_json::Map<String, serde_json::Value>;
+
+struct GetWorkspacesParams {
+    all: bool,
+}
+
+impl GetWorkspacesParams {
+    const PARAM_ALL: &'static str = "all";
+}
+
+impl FromStr for GetWorkspacesParams {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut all = false;
+
+        for item in s.split(';') {
+            all |= item.trim() == Self::PARAM_ALL;
+        }
+
+        Ok(Self { all })
+    }
+}
+
+struct SetWorkspaceParams {
+    workspace: String,
+    copy_from: Option<String>,
+}
+
+impl SetWorkspaceParams {
+    const PARAM_COPY_FROM: &'static str = "copy_from";
+}
+
+impl FromStr for SetWorkspaceParams {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut workspace = None;
+        let mut copy_from = None::<String>;
+
+        for item in s.split(';') {
+            match item.split_once('=') {
+                None => {
+                    let item = item.trim();
+                    if item.is_empty() {
+                        continue;
+                    }
+
+                    anyhow::ensure!(workspace.is_none(), "invalid param: {item}");
+                    workspace = Some(item.trim().to_owned());
+                }
+                Some((param, value)) => match param.trim() {
+                    Self::PARAM_COPY_FROM => copy_from = Some(value.trim().to_owned()),
+                    param => anyhow::bail!("unknown param: {param}"),
+                },
+            }
+        }
+
+        Ok(Self {
+            workspace: workspace.context("workspace name expected")?,
+            copy_from,
+        })
+    }
+}
+
+const DEFAULT_WORKSPACE: &str = "default";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitInfo {
@@ -879,6 +1207,11 @@ impl LongReply {
 pub enum Reply {
     Timings(StateTimings),
     Commit(CommitInfo),
+    Workspace(String),
+    Workspaces {
+        current: String,
+        workspaces: Vec<String>,
+    },
     Account {
         address: StdAddr,
         balance: DecimalTokens,
@@ -901,6 +1234,14 @@ pub enum Reply {
     AccessDenied,
     ResetFrozen(ResetFrozen),
     ResetType(ResetType),
+    WorkspaceRemoved,
+    WorkspaceChanged {
+        is_new: bool,
+        node_source: ConfigSource,
+        logger_source: ConfigSource,
+        zerostate_source: ConfigSource,
+        copy_from: Option<String>,
+    },
 }
 
 impl Reply {
@@ -941,6 +1282,23 @@ impl std::fmt::Display for Reply {
                 }
 
                 f.write_str(&commit.html_url)
+            }
+            Self::Workspace(current) => {
+                writeln!(f, "Workspace: `{current}`")
+            }
+            Self::Workspaces {
+                current,
+                workspaces,
+            } => {
+                for workspace in workspaces {
+                    let current = if workspace == current {
+                        " // <- current"
+                    } else {
+                        ""
+                    };
+                    writeln!(f, "- `{workspace}`{current}")?;
+                }
+                Ok(())
             }
             Self::Account {
                 address,
@@ -1010,6 +1368,61 @@ impl std::fmt::Display for Reply {
             }
             Self::ResetType(reset_type) => {
                 write!(f, "Reset type: *{reset_type}*")
+            }
+            Self::WorkspaceRemoved => {
+                write!(f, "Workspace removed")
+            }
+            Self::WorkspaceChanged {
+                is_new,
+                logger_source,
+                node_source,
+                zerostate_source,
+                copy_from,
+            } => {
+                struct SourceWithWorkspace<'a> {
+                    workspace: &'a str,
+                    source: ConfigSource,
+                }
+
+                impl std::fmt::Display for SourceWithWorkspace<'_> {
+                    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        match self.source {
+                            ConfigSource::Unchanged => write!(f, "unchanged"),
+                            ConfigSource::Copied => write!(f, "copied from `{}`", self.workspace),
+                            ConfigSource::FromFile => write!(f, "loaded from file"),
+                        }
+                    }
+                }
+
+                let workspace = copy_from.as_deref().unwrap_or(DEFAULT_WORKSPACE);
+
+                let action = if *is_new { "created" } else { "selected" };
+                writeln!(f, "Workspace {action}.\n")?;
+                writeln!(
+                    f,
+                    "- Node config: {};",
+                    SourceWithWorkspace {
+                        workspace,
+                        source: *node_source
+                    }
+                )?;
+                writeln!(
+                    f,
+                    "- Logger config: {};",
+                    SourceWithWorkspace {
+                        workspace,
+                        source: *logger_source
+                    }
+                )?;
+                writeln!(
+                    f,
+                    "- Zerostate config: {};",
+                    SourceWithWorkspace {
+                        workspace,
+                        source: *zerostate_source
+                    }
+                )?;
+                Ok(())
             }
         }
     }
