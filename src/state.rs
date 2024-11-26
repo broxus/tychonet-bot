@@ -28,11 +28,16 @@ use crate::util::{
 
 const DEFAULT_BRANCH: &str = "master";
 
+struct NetworkDescr {
+    jrpc_client: JrpcClient,
+    inventory: String,
+    reset_running: AtomicBool,
+}
+
 pub struct State {
-    jrpc_clients: HashMap<String, JrpcClient>,
     github_client: GithubClient,
     default_network: String,
-    inventory_files: HashMap<String, String>,
+    networks: HashMap<String, NetworkDescr>,
     ansible_config_file: String,
     node_config_file: String,
     logger_config_file: String,
@@ -42,7 +47,6 @@ pub struct State {
     allowed_groups: HashSet<i64>,
     authentication_enabled: bool,
     state_file: Mutex<StateFile>,
-    reset_running: AtomicBool,
     unfreeze_notifies: Mutex<HashMap<String, AbortHandle>>,
 }
 
@@ -78,24 +82,29 @@ impl State {
             settings.default_network
         );
 
-        anyhow::ensure!(
-            settings.rpc_urls.contains_key(&settings.default_network),
-            "no rpc found for the default network `{}`",
-            settings.default_network
-        );
+        let networks = settings
+            .inventory_files
+            .iter()
+            .map(|(network, inventory)| {
+                let Some(jrpc_url) = settings.rpc_urls.get(network) else {
+                    anyhow::bail!("no JRPC url found for network `{network}`");
+                };
+                let jrpc_client = JrpcClient::new(jrpc_url)
+                    .with_context(|| format!("failed to create JRPC client for {network}"))?;
+
+                let descr = NetworkDescr {
+                    jrpc_client,
+                    inventory: inventory.clone(),
+                    reset_running: AtomicBool::new(false),
+                };
+                Ok::<_, anyhow::Error>((network.clone(), descr))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
 
         let state = Arc::new(Self {
-            jrpc_clients: settings
-                .rpc_urls
-                .iter()
-                .map(|(network, url)| {
-                    let client = JrpcClient::new(url)?;
-                    Ok::<_, anyhow::Error>((network.clone(), client))
-                })
-                .collect::<Result<_>>()?,
             github_client,
             default_network: settings.default_network.clone(),
-            inventory_files: settings.inventory_files.clone(),
+            networks,
             ansible_config_file: settings.ansible_config_file.clone(),
             node_config_file: settings.node_config_file.clone(),
             logger_config_file: settings.logger_config_file.clone(),
@@ -105,7 +114,6 @@ impl State {
             allowed_groups: settings.allowed_groups.iter().copied().collect(),
             authentication_enabled: settings.authentication_enabled,
             state_file: Mutex::new(state_file),
-            reset_running: AtomicBool::new(false),
             unfreeze_notifies: Mutex::new(Default::default()),
         });
 
@@ -409,7 +417,7 @@ impl State {
             .current_network_name(&self.default_network)
             .to_owned();
 
-        let mut networks = self.inventory_files.keys().cloned().collect::<Vec<_>>();
+        let mut networks = self.networks.keys().cloned().collect::<Vec<_>>();
         networks.sort_unstable();
 
         Ok(Reply::Networks { current, networks })
@@ -422,7 +430,7 @@ impl State {
 
         let SetNetworkParams { network } = expr.parse()?;
         anyhow::ensure!(
-            self.inventory_files.contains_key(&network),
+            self.networks.contains_key(&network),
             "no inventory found for the network `{network}`"
         );
 
@@ -484,7 +492,7 @@ impl State {
         }
 
         let network;
-        let inventory_path;
+        let descr;
         let reset_type;
         'frozen: {
             let frozen = {
@@ -500,8 +508,8 @@ impl State {
                         .to_owned()
                 });
 
-                inventory_path = self
-                    .inventory_files
+                descr = self
+                    .networks
                     .get(&network)
                     .with_context(|| format!("no inventory found for the network `{network}`"))?;
 
@@ -541,14 +549,14 @@ impl State {
         }
 
         let _guard = {
-            if self.reset_running.swap(true, Ordering::Relaxed) {
+            if descr.reset_running.swap(true, Ordering::Relaxed) {
                 bot.send_message(msg.chat.id, "Reset is already running")
                     .reply_to(msg)
                     .await?;
                 return Ok(());
             }
 
-            ResetGuard(&self.reset_running)
+            ResetGuard(&descr.reset_running)
         };
 
         #[derive(Clone, Copy)]
@@ -668,7 +676,7 @@ impl State {
             .await?;
 
         let reset_output = self
-            .run_ansible_reset(inventory_path, &params.commit, reset_type)
+            .run_ansible_reset(&descr.inventory, &params.commit, reset_type)
             .await?;
         if !reset_output.status.success() {
             let e = String::from_utf8_lossy(&reset_output.stdout).to_string();
@@ -682,7 +690,7 @@ impl State {
         r.update(reply_body.with_title("🔄 Reset completed. Running setup playbook..."))
             .await?;
 
-        let setup_output = self.run_ansible_setup(inventory_path, &params).await?;
+        let setup_output = self.run_ansible_setup(&descr.inventory, &params).await?;
         if !setup_output.status.success() {
             let e = String::from_utf8_lossy(&setup_output.stdout).to_string();
             tracing::error!("Setup playbook execution failed: {e}");
@@ -880,8 +888,9 @@ impl State {
         let network_name = state_file
             .latest_data
             .current_network_name(&self.default_network);
-        self.jrpc_clients
+        self.networks
             .get(network_name)
+            .map(|descr| &descr.jrpc_client)
             .with_context(|| format!("no JRPC client found for the network `{network_name}`"))
     }
 
@@ -1473,10 +1482,12 @@ impl std::fmt::Display for Reply {
                 )
             }
             Self::Freeze { network } => {
-                write!(f, "🌐 Network: `{network}`\n\nReset is now frozen")
+                writeln!(f, "🌐 Network: `{network}`\n")?;
+                writeln!(f, "Reset is now frozen")
             }
             Self::Unfreeze { network } => {
-                write!(f, "🌐 Network: `{network}`\n\nReset is now available")
+                writeln!(f, "🌐 Network: `{network}`\n")?;
+                writeln!(f, "Reset is now available")
             }
             Self::NodeConfigUpdated(msg) => {
                 write!(f, "Node config updated:\n```json\n{msg}\n```")
@@ -1503,10 +1514,11 @@ impl std::fmt::Display for Reply {
                 let time_remaining =
                     Duration::from_secs(frozen.timestamp_until.saturating_sub(now_sec()));
 
+                writeln!(f, "🌐 Network: `{}`", frozen.network)?;
+                writeln!(f, "❄️ Reset is frozen")?;
                 write!(
                     f,
-                    "🌐 Network: `{}`\n❄️ Reset is frozen\n⏰ Time remaining: {}",
-                    frozen.network,
+                    "⏰ Time remaining: {}",
                     humantime::format_duration(time_remaining),
                 )?;
 
