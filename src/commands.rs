@@ -24,11 +24,15 @@ pub enum Command {
     #[command(description = "retrieve the current deployed commit.")]
     GetCommit,
     #[command(description = "get workspace")]
-    GetWorkspace(String),
+    GetWorkspace,
     #[command(description = "set current workspace")]
     SetWorkspace(String),
     #[command(description = "remove the specified workspace")]
     DelWorkspace(String),
+    #[command(description = "get network inventory")]
+    GetNetwork,
+    #[command(description = "set current network inventory")]
+    SetNetwork(String),
     #[command(description = "use one of reset types: `full` or `restart`")]
     SetResetType(String),
     #[command(description = "get current reset type.")]

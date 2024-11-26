@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
@@ -7,8 +8,9 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Settings {
     pub bot_token: String,
-    pub rpc_url: String,
-    pub inventory_file: String,
+    pub rpc_urls: HashMap<String, String>,
+    pub default_network: String,
+    pub inventory_files: HashMap<String, String>,
     pub ansible_config_file: String,
     pub node_config_file: String,
     pub logger_config_file: String,
@@ -26,8 +28,9 @@ pub fn load_settings() -> Result<Settings> {
 
     Ok(Settings {
         bot_token: get_env("BOT_TOKEN")?,
-        rpc_url: get_env("RPC_URL")?,
-        inventory_file: get_env("INVENTORY_FILE")?,
+        rpc_urls: get_env::<List<Named<String>>>("RPC_URLS")?.into_dict(),
+        default_network: get_env("DEFAULT_NETWORK")?,
+        inventory_files: get_env::<List<Named<String>>>("INVENTORY_FILES")?.into_dict(),
         ansible_config_file: get_env("ANSIBLE_CONFIG_FILE")?,
         node_config_file: get_env("NODE_CONFIG_FILE")?,
         logger_config_file: get_env("LOGGER_CONFIG_FILE")?,
@@ -54,6 +57,37 @@ impl<T: FromStr> FromStr for List<T> {
             .map(|s| s.trim().parse::<T>())
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self(list))
+    }
+}
+
+struct Named<T> {
+    name: String,
+    value: T,
+}
+
+impl<T> List<Named<T>> {
+    pub fn into_dict(self) -> HashMap<String, T> {
+        self.0
+            .into_iter()
+            .map(|Named { name, value }| (name, value))
+            .collect()
+    }
+}
+
+impl<T> FromStr for Named<T>
+where
+    T: FromStr<Err: std::error::Error + Send + Sync + 'static>,
+{
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (name, value) = s.split_once('=').context("expected a `name=value`")?;
+        let res = Self {
+            name: name.trim().to_owned(),
+            value: T::from_str(value.trim())?,
+        };
+        anyhow::ensure!(!res.name.is_empty(), "name is empty");
+        Ok(res)
     }
 }
 

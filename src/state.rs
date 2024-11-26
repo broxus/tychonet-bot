@@ -29,9 +29,10 @@ use crate::util::{
 const DEFAULT_BRANCH: &str = "master";
 
 pub struct State {
-    jrpc_client: JrpcClient,
+    jrpc_clients: HashMap<String, JrpcClient>,
     github_client: GithubClient,
-    inventory_file: String,
+    default_network: String,
+    inventory_files: HashMap<String, String>,
     ansible_config_file: String,
     node_config_file: String,
     logger_config_file: String,
@@ -42,7 +43,7 @@ pub struct State {
     authentication_enabled: bool,
     state_file: Mutex<StateFile>,
     reset_running: AtomicBool,
-    unfreeze_notify: Mutex<Option<AbortHandle>>,
+    unfreeze_notifies: Mutex<HashMap<String, AbortHandle>>,
 }
 
 impl State {
@@ -62,16 +63,39 @@ impl State {
             state_file.save()?;
         }
 
-        let unfreeze_timestamp = state_file
+        let unfreeze_timestamps = state_file
             .latest_data
             .reset_frozen
-            .as_ref()
-            .map(|f| f.timestamp_until);
+            .iter()
+            .map(|(network, f)| (network.clone(), f.timestamp_until))
+            .collect::<Vec<_>>();
+
+        anyhow::ensure!(
+            settings
+                .inventory_files
+                .contains_key(&settings.default_network),
+            "no inventory found for the default network `{}`",
+            settings.default_network
+        );
+
+        anyhow::ensure!(
+            settings.rpc_urls.contains_key(&settings.default_network),
+            "no rpc found for the default network `{}`",
+            settings.default_network
+        );
 
         let state = Arc::new(Self {
-            jrpc_client: JrpcClient::new(&settings.rpc_url)?,
+            jrpc_clients: settings
+                .rpc_urls
+                .iter()
+                .map(|(network, url)| {
+                    let client = JrpcClient::new(url)?;
+                    Ok::<_, anyhow::Error>((network.clone(), client))
+                })
+                .collect::<Result<_>>()?,
             github_client,
-            inventory_file: settings.inventory_file.clone(),
+            default_network: settings.default_network.clone(),
+            inventory_files: settings.inventory_files.clone(),
             ansible_config_file: settings.ansible_config_file.clone(),
             node_config_file: settings.node_config_file.clone(),
             logger_config_file: settings.logger_config_file.clone(),
@@ -82,20 +106,30 @@ impl State {
             authentication_enabled: settings.authentication_enabled,
             state_file: Mutex::new(state_file),
             reset_running: AtomicBool::new(false),
-            unfreeze_notify: Mutex::new(None),
+            unfreeze_notifies: Mutex::new(Default::default()),
         });
 
-        if let Some(at) = unfreeze_timestamp {
+        for (network, at) in unfreeze_timestamps {
             let duration = Duration::from_secs(at.saturating_sub(now_sec()));
-            *state.unfreeze_notify.lock().unwrap() =
-                Some(tokio::spawn(state.clone().unfreeze_task(bot, duration)).abort_handle());
+            let task = tokio::spawn(state.clone().unfreeze_task(
+                bot.clone(),
+                network.clone(),
+                duration,
+            ))
+            .abort_handle();
+
+            state
+                .unfreeze_notifies
+                .lock()
+                .unwrap()
+                .insert(network, task);
         }
 
         Ok(state)
     }
 
     pub async fn get_status(&self) -> Result<Reply> {
-        self.jrpc_client
+        self.get_current_jrpc_client()?
             .get_timings()
             .await
             .map(Reply::Timings)
@@ -103,7 +137,7 @@ impl State {
     }
 
     pub async fn get_account(&self, address: &StdAddr) -> Result<Reply> {
-        let res = self.jrpc_client.get_account(address).await?;
+        let res = self.get_current_jrpc_client()?.get_account(address).await?;
         let reply = match res {
             jrpc_client::AccountStateResponse::NotExists { .. } => Reply::Account {
                 address: address.clone(),
@@ -127,7 +161,7 @@ impl State {
     }
 
     pub async fn get_param(&self, param: i32) -> Result<Reply> {
-        let res = self.jrpc_client.get_config().await?;
+        let res = self.get_current_jrpc_client()?.get_config().await?;
         let value = serde_json::to_value(res.config.params)?;
 
         Ok(Reply::ConfigParam {
@@ -159,31 +193,45 @@ impl State {
         );
 
         let mut state_file = self.state_file.lock().unwrap();
-        if let Some(frozen) = &state_file.latest_data.reset_frozen {
+        let network = state_file
+            .latest_data
+            .current_network_name(&self.default_network)
+            .to_owned();
+
+        if let Some(frozen) = state_file.latest_data.reset_frozen.get(&network) {
             return Ok(Reply::ResetFrozen(frozen.clone()));
         }
 
         let timestamp_until = now_sec() + duration.as_secs();
-        state_file.latest_data.reset_frozen = Some(ResetFrozen {
-            reason,
-            timestamp_until,
-            chat_id: msg.chat.id,
-            message_id: msg.id,
-            message_thread_id: msg.thread_id,
-        });
+        state_file.latest_data.reset_frozen.insert(
+            network.clone(),
+            ResetFrozen {
+                network: network.clone(),
+                reason,
+                timestamp_until,
+                chat_id: msg.chat.id,
+                message_id: msg.id,
+                message_thread_id: msg.thread_id,
+            },
+        );
         state_file.save()?;
 
         {
-            let mut notify = self.unfreeze_notify.lock().unwrap();
-            if let Some(notify) = notify.take() {
+            let mut notify = self.unfreeze_notifies.lock().unwrap();
+            if let Some(notify) = notify.remove(&network) {
                 notify.abort();
             }
-            *notify = Some(
-                tokio::spawn(self.clone().unfreeze_task(bot.clone(), duration)).abort_handle(),
-            );
+
+            let task = tokio::spawn(self.clone().unfreeze_task(
+                bot.clone(),
+                network.clone(),
+                duration,
+            ))
+            .abort_handle();
+            notify.insert(network.clone(), task);
         }
 
-        Ok(Reply::Freeze)
+        Ok(Reply::Freeze { network })
     }
 
     pub fn unfreeze(&self, msg: &Message) -> Result<Reply> {
@@ -192,16 +240,25 @@ impl State {
         }
 
         let mut state_file = self.state_file.lock().unwrap();
-        if state_file.latest_data.reset_frozen.is_some() {
-            state_file.latest_data.reset_frozen = None;
+        let network = state_file
+            .latest_data
+            .current_network_name(&self.default_network)
+            .to_owned();
+
+        if state_file
+            .latest_data
+            .reset_frozen
+            .remove(&network)
+            .is_some()
+        {
             state_file.save()?;
         }
 
-        if let Some(notify) = self.unfreeze_notify.lock().unwrap().take() {
+        if let Some(notify) = self.unfreeze_notifies.lock().unwrap().remove(&network) {
             notify.abort();
         }
 
-        Ok(Reply::Unfreeze)
+        Ok(Reply::Unfreeze { network })
     }
 
     pub fn get_saved_commit(&self) -> Result<Reply> {
@@ -262,16 +319,19 @@ impl State {
         let prev_workspace = prev_workspace.clone();
 
         let is_new;
+        let network;
         match state_file.latest_data.workspaces.entry(workspace.clone()) {
             hash_map::Entry::Vacant(entry) => {
                 is_new = true;
-                entry.insert(prev_workspace.clone());
+                network = prev_workspace.network.clone();
+                entry.insert(prev_workspace);
             }
             hash_map::Entry::Occupied(mut entry) => {
                 is_new = false;
                 if copy_from.is_some() {
                     entry.insert(prev_workspace);
                 }
+                network = entry.get().network.clone();
             }
         }
 
@@ -280,6 +340,7 @@ impl State {
 
         Ok(Reply::WorkspaceChanged {
             is_new,
+            network: network.unwrap_or_else(|| self.default_network.clone()),
             node_source,
             logger_source,
             zerostate_source,
@@ -287,9 +348,7 @@ impl State {
         })
     }
 
-    pub fn get_workspace(&self, expr: &str) -> Result<Reply> {
-        let GetWorkspacesParams { all } = expr.parse()?;
-
+    pub fn get_workspace(&self) -> Result<Reply> {
         let state_file = self.state_file.lock().unwrap();
 
         let current = state_file
@@ -297,10 +356,6 @@ impl State {
             .current_workspace
             .clone()
             .unwrap_or_else(|| DEFAULT_WORKSPACE.to_owned());
-
-        if !all {
-            return Ok(Reply::Workspace(current));
-        }
 
         let mut workspaces = Vec::new();
         if !state_file.latest_data.workspaces.contains_key(&current) {
@@ -346,6 +401,53 @@ impl State {
         Ok(Reply::WorkspaceRemoved)
     }
 
+    pub fn get_network(&self) -> Result<Reply> {
+        let state_file = self.state_file.lock().unwrap();
+
+        let current = state_file
+            .latest_data
+            .current_network_name(&self.default_network)
+            .to_owned();
+
+        let mut networks = self.inventory_files.keys().cloned().collect::<Vec<_>>();
+        networks.sort_unstable();
+
+        Ok(Reply::Networks { current, networks })
+    }
+
+    pub fn set_network(&self, msg: &Message, expr: &str) -> Result<Reply> {
+        if !self.check_auth(msg) {
+            return Ok(Reply::AccessDenied);
+        }
+
+        let SetNetworkParams { network } = expr.parse()?;
+        anyhow::ensure!(
+            self.inventory_files.contains_key(&network),
+            "no inventory found for the network `{network}`"
+        );
+
+        let mut state_file = self.state_file.lock().unwrap();
+        let current_workspace_name = state_file.latest_data.current_workspace_name();
+
+        let current_workspace = state_file
+            .latest_data
+            .workspaces
+            .entry(current_workspace_name.clone())
+            .or_default();
+
+        current_workspace.network = Some(network.clone());
+        state_file.save()?;
+
+        Ok(Reply::WorkspaceChanged {
+            is_new: false,
+            network,
+            node_source: ConfigSource::Unchanged,
+            logger_source: ConfigSource::Unchanged,
+            zerostate_source: ConfigSource::Unchanged,
+            copy_from: None,
+        })
+    }
+
     pub fn get_reset_type(&self) -> Result<Reply> {
         let state_file = self.state_file.lock().unwrap();
         Ok(Reply::ResetType(state_file.latest_data.reset_type))
@@ -381,6 +483,8 @@ impl State {
             return Ok(());
         }
 
+        let network;
+        let inventory_path;
         let reset_type;
         'frozen: {
             let frozen = {
@@ -389,7 +493,19 @@ impl State {
                     .reset_type
                     .unwrap_or(state_file.latest_data.reset_type);
 
-                let Some(frozen) = &state_file.latest_data.reset_frozen else {
+                network = params.network.clone().unwrap_or_else(|| {
+                    state_file
+                        .latest_data
+                        .current_network_name(&self.default_network)
+                        .to_owned()
+                });
+
+                inventory_path = self
+                    .inventory_files
+                    .get(&network)
+                    .with_context(|| format!("no inventory found for the network `{network}`"))?;
+
+                let Some(frozen) = state_file.latest_data.reset_frozen.get(&network) else {
                     state_file.latest_data.apply_workspace_configs(
                         &self.node_config_file,
                         &self.logger_config_file,
@@ -400,12 +516,12 @@ impl State {
                 };
 
                 if now_sec() >= frozen.timestamp_until {
-                    if let Some(notify) = self.unfreeze_notify.lock().unwrap().take() {
+                    if let Some(notify) = self.unfreeze_notifies.lock().unwrap().remove(&network) {
                         notify.abort();
                     }
 
                     // Unfreeze on timestamp reached
-                    state_file.latest_data.reset_frozen = None;
+                    state_file.latest_data.reset_frozen.remove(&network);
                     state_file.latest_data.apply_workspace_configs(
                         &self.node_config_file,
                         &self.logger_config_file,
@@ -437,6 +553,7 @@ impl State {
 
         #[derive(Clone, Copy)]
         struct ReplyText<'a> {
+            network: &'a str,
             commit_info: &'a CommitInfo,
             reset_type: ResetType,
             started_at: Instant,
@@ -452,6 +569,7 @@ impl State {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let elapsed_secs = self.started_at.elapsed().as_secs();
                 let duration = humantime::format_duration(Duration::from_secs(elapsed_secs));
+                writeln!(f, "🌐 Network: `{}`", self.network)?;
                 writeln!(f, "⏰ Elapsed: {duration}")?;
                 writeln!(
                     f,
@@ -521,6 +639,7 @@ impl State {
 
         let commit_info = self.get_commit_info(&params.commit).await?;
         let reply_body = ReplyText {
+            network: &network,
             commit_info: &commit_info,
             reset_type,
             started_at: Instant::now(),
@@ -548,7 +667,9 @@ impl State {
         r.update(reply_body.with_title("🔄 Gate updated. Running reset playbook..."))
             .await?;
 
-        let reset_output = self.run_ansible_reset(&params.commit, reset_type).await?;
+        let reset_output = self
+            .run_ansible_reset(inventory_path, &params.commit, reset_type)
+            .await?;
         if !reset_output.status.success() {
             let e = String::from_utf8_lossy(&reset_output.stdout).to_string();
             tracing::error!("Reset playbook execution failed: {e}");
@@ -561,7 +682,7 @@ impl State {
         r.update(reply_body.with_title("🔄 Reset completed. Running setup playbook..."))
             .await?;
 
-        let setup_output = self.run_ansible_setup(&params).await?;
+        let setup_output = self.run_ansible_setup(inventory_path, &params).await?;
         if !setup_output.status.success() {
             let e = String::from_utf8_lossy(&setup_output.stdout).to_string();
             tracing::error!("Setup playbook execution failed: {e}");
@@ -602,6 +723,7 @@ impl State {
 
     async fn run_ansible_reset(
         &self,
+        inventory_path: &str,
         commit: &str,
         reset_type: ResetType,
     ) -> Result<std::process::Output> {
@@ -609,7 +731,7 @@ impl State {
 
         tokio::process::Command::new("ansible-playbook")
             .arg("-i")
-            .arg(&self.inventory_file)
+            .arg(inventory_path)
             .arg(&self.reset_playbook)
             .arg("--extra-vars")
             .arg(format!("tycho_commit={commit} restart_only={restart_only}"))
@@ -621,29 +743,19 @@ impl State {
             .context("Failed to execute reset playbook")
     }
 
-    async fn run_ansible_setup(&self, params: &ResetParams) -> Result<std::process::Output> {
-        let mempool_start_round = params
-            .mempool_start_round
-            .map(|r| format!(" mempool_start_round={r}"))
-            .unwrap_or_default();
-
-        let from_mc_block_seqno = params
-            .from_mc_block_seqno
-            .map(|s| format!(" from_mc_block_seqno={s}"))
-            .unwrap_or_default();
-
+    async fn run_ansible_setup(
+        &self,
+        inventory_path: &str,
+        params: &ResetParams,
+    ) -> Result<std::process::Output> {
         tokio::process::Command::new("ansible-playbook")
             .arg("-i")
-            .arg(&self.inventory_file)
+            .arg(inventory_path)
             .arg(&self.setup_playbook)
             .arg("--extra-vars")
             .arg(format!(
-                "tycho_commit={} tycho_build_profile={} n_nodes={}{}{}",
-                params.commit,
-                params.build_profile,
-                params.node_count,
-                mempool_start_round,
-                from_mc_block_seqno
+                "tycho_commit={} tycho_build_profile={} n_nodes={}",
+                params.commit, params.build_profile, params.node_count,
             ))
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -763,12 +875,22 @@ impl State {
         Ok(value)
     }
 
-    async fn unfreeze_task(self: Arc<Self>, bot: Bot, duration: Duration) {
+    fn get_current_jrpc_client(&self) -> Result<&JrpcClient> {
+        let state_file = self.state_file.lock().unwrap();
+        let network_name = state_file
+            .latest_data
+            .current_network_name(&self.default_network);
+        self.jrpc_clients
+            .get(network_name)
+            .with_context(|| format!("no JRPC client found for the network `{network_name}`"))
+    }
+
+    async fn unfreeze_task(self: Arc<Self>, bot: Bot, network: String, duration: Duration) {
         tokio::time::sleep(duration).await;
 
         let frozen = {
             let mut state_file = self.state_file.lock().unwrap();
-            let Some(frozen) = state_file.latest_data.reset_frozen.take() else {
+            let Some(frozen) = state_file.latest_data.reset_frozen.remove(&network) else {
                 return;
             };
 
@@ -779,7 +901,7 @@ impl State {
             frozen
         };
 
-        let mut msg = bot.send_message(frozen.chat_id, Reply::Unfreeze.to_string());
+        let mut msg = bot.send_message(frozen.chat_id, Reply::Unfreeze { network }.to_string());
         msg.reply_parameters = Some(ReplyParameters {
             message_id: frozen.message_id,
             ..Default::default()
@@ -813,16 +935,14 @@ pub struct ResetParams {
     pub node_count: usize,
     pub build_profile: String,
     pub reset_type: Option<ResetType>,
-    pub mempool_start_round: Option<u64>,
-    pub from_mc_block_seqno: Option<u32>,
+    pub network: Option<String>,
 }
 
 impl ResetParams {
     const PARAM_NODE_COUNT: &'static str = "nodes";
     const PARAM_BUILD_PROFILE: &'static str = "profile";
     const PARAM_RESET_TYPE: &'static str = "type";
-    const PARAM_MEMPOOL_START_ROUND: &'static str = "mempool_start_round";
-    const PARAM_FROM_MC_BLOCK_SEQNO: &'static str = "from_mc_block_seqno";
+    const PARAM_NETWORK: &'static str = "network";
 
     const DEFAULT_COMMIT: &'static str = "master";
     const DEFAULT_NODE_COUNT: usize = 13;
@@ -837,8 +957,7 @@ impl FromStr for ResetParams {
         let mut node_count = Self::DEFAULT_NODE_COUNT;
         let mut build_profile = Self::DEFAULT_BUILD_PROFILE.to_string();
         let mut reset_type = None::<ResetType>;
-        let mut mempool_start_round = None::<u64>;
-        let mut from_mc_block_seqno = None::<u32>;
+        let mut network = None::<String>;
 
         for item in s.split(';') {
             match item.split_once('=') {
@@ -855,12 +974,7 @@ impl FromStr for ResetParams {
                     Self::PARAM_NODE_COUNT => node_count = value.trim().parse()?,
                     Self::PARAM_BUILD_PROFILE => value.trim().clone_into(&mut build_profile),
                     Self::PARAM_RESET_TYPE => reset_type = Some(value.trim().parse()?),
-                    Self::PARAM_MEMPOOL_START_ROUND => {
-                        mempool_start_round = Some(value.trim().parse()?);
-                    }
-                    Self::PARAM_FROM_MC_BLOCK_SEQNO => {
-                        from_mc_block_seqno = Some(value.trim().parse()?);
-                    }
+                    Self::PARAM_NETWORK => network = Some(value.trim().to_owned()),
                     param => anyhow::bail!("unknown param: {param}"),
                 },
             }
@@ -871,8 +985,7 @@ impl FromStr for ResetParams {
             node_count,
             build_profile,
             reset_type,
-            mempool_start_round,
-            from_mc_block_seqno,
+            network,
         })
     }
 }
@@ -909,7 +1022,7 @@ impl StateFile {
 #[serde(default)]
 struct StateFileData {
     last_commit_info: Option<CommitInfo>,
-    reset_frozen: Option<ResetFrozen>,
+    reset_frozen: HashMap<String, ResetFrozen>,
     #[serde(default)]
     reset_type: ResetType,
     #[serde(default)]
@@ -958,10 +1071,20 @@ impl StateFileData {
             .unwrap_or(DEFAULT_WORKSPACE)
             .to_owned()
     }
+
+    fn current_network_name<'a>(&'a self, default_network: &'a str) -> &'a str {
+        let current_workspace = self.current_workspace_name();
+        self.workspaces
+            .get(&current_workspace)
+            .and_then(|w| w.network.as_deref())
+            .unwrap_or(default_network)
+    }
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 struct Workspace {
+    #[serde(default)]
+    network: Option<String>,
     #[serde(default)]
     node: Option<JsonObject>,
     #[serde(default)]
@@ -996,28 +1119,6 @@ impl Workspace {
 }
 
 type JsonObject = serde_json::Map<String, serde_json::Value>;
-
-struct GetWorkspacesParams {
-    all: bool,
-}
-
-impl GetWorkspacesParams {
-    const PARAM_ALL: &'static str = "all";
-}
-
-impl FromStr for GetWorkspacesParams {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut all = false;
-
-        for item in s.split(';') {
-            all |= item.trim() == Self::PARAM_ALL;
-        }
-
-        Ok(Self { all })
-    }
-}
 
 struct SetWorkspaceParams {
     workspace: String,
@@ -1062,6 +1163,37 @@ impl FromStr for SetWorkspaceParams {
 
 const DEFAULT_WORKSPACE: &str = "default";
 
+struct SetNetworkParams {
+    network: String,
+}
+
+impl FromStr for SetNetworkParams {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut network = None;
+
+        for item in s.split(';') {
+            match item.split_once('=') {
+                None => {
+                    let item = item.trim();
+                    if item.is_empty() {
+                        continue;
+                    }
+
+                    anyhow::ensure!(network.is_none(), "invalid param: {item}");
+                    network = Some(item.trim().to_owned());
+                }
+                Some((param, _)) => anyhow::bail!("unknown param: {}", param.trim()),
+            }
+        }
+
+        Ok(Self {
+            network: network.context("network name expected")?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitInfo {
     pub sha: String,
@@ -1072,6 +1204,7 @@ pub struct CommitInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResetFrozen {
+    pub network: String,
     pub reason: Option<String>,
     pub timestamp_until: u64,
 
@@ -1207,10 +1340,13 @@ impl LongReply {
 pub enum Reply {
     Timings(StateTimings),
     Commit(CommitInfo),
-    Workspace(String),
     Workspaces {
         current: String,
         workspaces: Vec<String>,
+    },
+    Networks {
+        current: String,
+        networks: Vec<String>,
     },
     Account {
         address: StdAddr,
@@ -1223,8 +1359,12 @@ pub enum Reply {
         value: Value,
         param: i32,
     },
-    Freeze,
-    Unfreeze,
+    Freeze {
+        network: String,
+    },
+    Unfreeze {
+        network: String,
+    },
     NodeConfigUpdated(ConfigDiff),
     NodeConfigParam(String),
     LoggerConfigUpdated(ConfigDiff),
@@ -1237,6 +1377,7 @@ pub enum Reply {
     WorkspaceRemoved,
     WorkspaceChanged {
         is_new: bool,
+        network: String,
         node_source: ConfigSource,
         logger_source: ConfigSource,
         zerostate_source: ConfigSource,
@@ -1283,9 +1424,6 @@ impl std::fmt::Display for Reply {
 
                 f.write_str(&commit.html_url)
             }
-            Self::Workspace(current) => {
-                writeln!(f, "Workspace: `{current}`")
-            }
             Self::Workspaces {
                 current,
                 workspaces,
@@ -1297,6 +1435,17 @@ impl std::fmt::Display for Reply {
                         ""
                     };
                     writeln!(f, "- `{workspace}`{current}")?;
+                }
+                Ok(())
+            }
+            Self::Networks { current, networks } => {
+                for network in networks {
+                    let current = if network == current {
+                        " // <- current"
+                    } else {
+                        ""
+                    };
+                    writeln!(f, "- `{network}`{current}")?;
                 }
                 Ok(())
             }
@@ -1323,11 +1472,11 @@ impl std::fmt::Display for Reply {
                     "Global ID: {global_id}\nKey Block Seqno: {seqno}\n\nParam {param}:\n```json\n{value_str}\n```"
                 )
             }
-            Self::Freeze => {
-                write!(f, "Network reset is now frozen")
+            Self::Freeze { network } => {
+                write!(f, "🌐 Network: `{network}`\n\nReset is now frozen")
             }
-            Self::Unfreeze => {
-                write!(f, "Network reset is now available")
+            Self::Unfreeze { network } => {
+                write!(f, "🌐 Network: `{network}`\n\nReset is now available")
             }
             Self::NodeConfigUpdated(msg) => {
                 write!(f, "Node config updated:\n```json\n{msg}\n```")
@@ -1356,7 +1505,8 @@ impl std::fmt::Display for Reply {
 
                 write!(
                     f,
-                    "❄️ Network reset is frozen\n⏰ Time remaining: {}",
+                    "🌐 Network: `{}`\n❄️ Reset is frozen\n⏰ Time remaining: {}",
+                    frozen.network,
                     humantime::format_duration(time_remaining),
                 )?;
 
@@ -1374,6 +1524,7 @@ impl std::fmt::Display for Reply {
             }
             Self::WorkspaceChanged {
                 is_new,
+                network,
                 logger_source,
                 node_source,
                 zerostate_source,
@@ -1397,7 +1548,8 @@ impl std::fmt::Display for Reply {
                 let workspace = copy_from.as_deref().unwrap_or(DEFAULT_WORKSPACE);
 
                 let action = if *is_new { "created" } else { "selected" };
-                writeln!(f, "Workspace {action}.\n")?;
+                writeln!(f, "✅ Workspace {action}.")?;
+                writeln!(f, "🌐 Network: `{network}`\n")?;
                 writeln!(
                     f,
                     "- Node config: {};",
