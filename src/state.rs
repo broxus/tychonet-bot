@@ -406,6 +406,7 @@ impl State {
             anyhow::bail!("workspace does not exist: `{workspace_name}`");
         }
 
+        state_file.save()?;
         Ok(Reply::WorkspaceRemoved)
     }
 
@@ -622,7 +623,16 @@ impl State {
             }
         }
 
-        impl LongReply {
+        trait LongReplyExt {
+            async fn reply_error(
+                &self,
+                body: ReplyText<'_>,
+                title: &str,
+                error: String,
+            ) -> Result<()>;
+        }
+
+        impl LongReplyExt for LongReply {
             async fn reply_error(
                 &self,
                 body: ReplyText<'_>,

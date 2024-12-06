@@ -10,7 +10,7 @@ bytes = "1.4"
 dotenvy = "0.15.7"
 humantime = "2.1"
 num-format = "0.4"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12.9", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
 similar = "2.5"
@@ -25,3 +25,8 @@ everscale-types = { version = "0.1.2", default-features = false, features = [
     "base64",
     "serde",
 ] }
+
+[patch.crates-io]
+teloxide = { git = "https://github.com/teloxide/teloxide.git", rev = "94db1757dc96116f4756a586fcbce3ac5ebd0c59" }
+teloxide-core = { git = "https://github.com/teloxide/teloxide.git", rev = "94db1757dc96116f4756a586fcbce3ac5ebd0c59" }
+teloxide-macros = { git = "https://github.com/teloxide/teloxide.git", rev = "94db1757dc96116f4756a586fcbce3ac5ebd0c59" }
