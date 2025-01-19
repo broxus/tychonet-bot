@@ -195,10 +195,10 @@ impl State {
                 (duration, None)
             }
         };
-        anyhow::ensure!(
-            duration <= Duration::from_secs(86400),
-            "Cannot freeze for more than 24 hours"
-        );
+        // anyhow::ensure!(
+        //     duration <= Duration::from_secs(86400),
+        //     "Cannot freeze for more than 24 hours"
+        // );
 
         let mut state_file = self.state_file.lock().unwrap();
         let network = state_file
