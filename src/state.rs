@@ -766,15 +766,21 @@ impl State {
         inventory_path: &str,
         params: &ResetParams,
     ) -> Result<std::process::Output> {
+        let mut args = format!(
+            "tycho_commit={} tycho_build_profile={} n_nodes={}",
+            params.commit, params.build_profile, params.node_count,
+        );
+
+        if let Some(repo) = &params.repo {
+            args = format!("{args} tycho_repo={repo}");
+        }
+
         tokio::process::Command::new("ansible-playbook")
             .arg("-i")
             .arg(inventory_path)
             .arg(&self.setup_playbook)
             .arg("--extra-vars")
-            .arg(format!(
-                "tycho_commit={} tycho_build_profile={} n_nodes={}",
-                params.commit, params.build_profile, params.node_count,
-            ))
+            .arg(args)
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .env(ANSIBLE_CONFIG_ENV, &self.ansible_config_file)
@@ -953,11 +959,13 @@ pub struct ResetParams {
     pub commit: String,
     pub node_count: usize,
     pub build_profile: String,
+    pub repo: Option<String>,
     pub reset_type: Option<ResetType>,
     pub network: Option<String>,
 }
 
 impl ResetParams {
+    const PARAM_REPO: &'static str = "repo";
     const PARAM_NODE_COUNT: &'static str = "nodes";
     const PARAM_BUILD_PROFILE: &'static str = "profile";
     const PARAM_RESET_TYPE: &'static str = "type";
@@ -973,6 +981,7 @@ impl FromStr for ResetParams {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut commit = None;
+        let mut repo = None;
         let mut node_count = Self::DEFAULT_NODE_COUNT;
         let mut build_profile = Self::DEFAULT_BUILD_PROFILE.to_string();
         let mut reset_type = None::<ResetType>;
@@ -990,6 +999,7 @@ impl FromStr for ResetParams {
                     commit = Some(item.trim().to_owned());
                 }
                 Some((param, value)) => match param.trim() {
+                    Self::PARAM_REPO => repo = Some(value.trim().to_owned()),
                     Self::PARAM_NODE_COUNT => node_count = value.trim().parse()?,
                     Self::PARAM_BUILD_PROFILE => value.trim().clone_into(&mut build_profile),
                     Self::PARAM_RESET_TYPE => reset_type = Some(value.trim().parse()?),
@@ -1002,6 +1012,7 @@ impl FromStr for ResetParams {
         Ok(Self {
             commit: commit.unwrap_or_else(|| Self::DEFAULT_COMMIT.to_owned()),
             node_count,
+            repo,
             build_profile,
             reset_type,
             network,
